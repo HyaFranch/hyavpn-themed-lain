@@ -354,7 +354,12 @@ class InstallerApi:
         self._skip_openvpn = False
         self._log("downloading openvpn...", "dim")
         ctx = ssl.create_default_context()
-        urllib.request.urlretrieve(OPENVPN_URL, OPENVPN_MSI)
+        # urlretrieve manda o User-Agent padrão do Python (Python-urllib/x.y),
+        # e o Cloudflare do swupdate.openvpn.org bloqueia isso com 403.
+        # Usando Request com um User-Agent normal, igual o resto do arquivo já faz.
+        req = urllib.request.Request(OPENVPN_URL, headers={"User-Agent": "hyavpn-installer"})
+        with urllib.request.urlopen(req, context=ctx, timeout=60) as r, open(OPENVPN_MSI, "wb") as f:
+            shutil.copyfileobj(r, f)
         self._log("download complete.", "green")
 
     def _step_openvpn_install(self):
