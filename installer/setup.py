@@ -383,8 +383,14 @@ class InstallerApi:
             self._log("openvpn already installed.", "dim")
             return
         self._log("installing openvpn silently (requires admin)...", "pink")
+        # ADDLOCAL=OpenVPN sozinho instala só o binário/serviço, sem o driver
+        # de adaptador de rede (TAP/Wintun). Sem esse driver o openvpn.exe
+        # sobe mas não acha adaptador nenhum pra criar o túnel: "There are
+        # no TAP-Windows, Wintun or ovpn-dco adapter" -> timeout. ADDLOCAL=ALL
+        # garante que o driver entra junto, independente de como as features
+        # são nomeadas nesta build do MSI (varia entre versões do OpenVPN).
         subprocess.run(
-            ["msiexec", "/i", OPENVPN_MSI, "/quiet", "/norestart", "ADDLOCAL=OpenVPN"],
+            ["msiexec", "/i", OPENVPN_MSI, "/quiet", "/norestart", "ADDLOCAL=ALL"],
             check=True,
         )
         self._log("openvpn installed.", "green")
