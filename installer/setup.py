@@ -122,8 +122,8 @@ INSTALLER_HTML = r"""<!DOCTYPE html>
 <body>
 <div id="titlebar">
   <div class="tb-dots">
-    <button class="dot-btn dot-close" onclick="webview.api.close_window()" title="close"></button>
-    <button class="dot-btn dot-mini"  onclick="webview.api.minimize_window()" title="minimize"></button>
+    <button class="dot-btn dot-close" onclick="pywebview.api.close_window()" title="close"></button>
+    <button class="dot-btn dot-mini"  onclick="pywebview.api.minimize_window()" title="minimize"></button>
   </div>
   <span class="tb-title">hyavpn setup</span>
 </div>
@@ -139,7 +139,7 @@ INSTALLER_HTML = r"""<!DOCTYPE html>
 
   <div id="progress-wrap"><div id="progress-bar"></div></div>
 
-  <button id="btn-install" onclick="webview.api.start_install()">[ INSTALL ]</button>
+  <button id="btn-install" onclick="pywebview.api.start_install()">[ INSTALL ]</button>
 </div>
 
 <script>
@@ -165,12 +165,12 @@ function setBtn(text, disabled) {
   const b = document.getElementById('btn-install');
   if (text) b.textContent = text;
   b.disabled = disabled;
-  if (!disabled) b.onclick = disabled ? null : () => webview.api.start_install();
+  if (!disabled) b.onclick = disabled ? null : () => pywebview.api.start_install();
 }
 function onDone(closeText) {
   document.getElementById('btn-install').textContent = closeText || '[ CLOSE ]';
   document.getElementById('btn-install').disabled = false;
-  document.getElementById('btn-install').onclick = () => webview.api.close_window();
+  document.getElementById('btn-install').onclick = () => pywebview.api.close_window();
 }
 
 window.installer = { addLog, setStatus, setProgress, setBtn, onDone };
