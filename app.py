@@ -207,6 +207,48 @@ def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
     return x
 
 
+def _strip_native_decorations(win, appwindow=False):
+    """Remove a titlebar/moldura nativa de UMA JANELA do Windows via WinAPI,
+    sem NUNCA usar overrideredirect. overrideredirect destrói e recria a
+    HWND por baixo dos panos -- é isso que causa o flash branco (no
+    minimizar/restaurar/alt-tab) e também pode deixar uma janela dona num
+    estado sem repaint quando uma filha overrideredirect+grab é fechada
+    (a janela "some" mesmo com o processo continuando vivo). Usada tanto
+    na janela principal quanto na de settings, pra tirar overrideredirect
+    do app inteiro.
+
+    appwindow=True dá um botão próprio na barra de tarefas + minimizar
+    (usado só na janela principal). Janelas modais (settings) ficam com o
+    comportamento padrão de "dona/filha" do Windows, sem botão próprio."""
+    import ctypes
+    GWL_STYLE, GWL_EXSTYLE = -16, -20
+    WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
+    WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0004, 0x0020
+    try:
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+        style = (style & ~(WS_CAPTION | WS_THICKFRAME)) | WS_SYSMENU
+        if appwindow:
+            style |= WS_MINIMIZEBOX
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+
+        if appwindow:
+            exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
+
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, 0, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _make_draggable(win, widgets):
     """Liga os widgets passados (normalmente a barra e o título) pra
     arrastar a janela pelo mouse -- perdido junto com a decoração nativa
@@ -295,7 +337,7 @@ class VPNManager:
     # ── Preferência de split tunneling ────────────────────────────────────────
     def _load_split_tunnel_pref(self):
         try:
-            with open(self.SETTINGS_FILE, "r") as f:
+            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return bool(data.get("split_tunnel", False))
         except Exception:
@@ -306,10 +348,10 @@ class VPNManager:
         try:
             data = {}
             if os.path.exists(self.SETTINGS_FILE):
-                with open(self.SETTINGS_FILE, "r") as f:
+                with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
             data["split_tunnel"] = self.split_tunnel
-            with open(self.SETTINGS_FILE, "w") as f:
+            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception as e:
             self.log(f"failed to save settings: {e}", "red")
@@ -395,7 +437,7 @@ class VPNManager:
             return False
 
         cert_file = os.path.join(self.CONFIG_DIR, "client.pem")
-        with open(cert_file, "w") as f:
+        with open(cert_file, "w", encoding="utf-8") as f:
             f.write(cert_pem)
 
         # Gera .ovpn
@@ -403,6 +445,15 @@ class VPNManager:
         cipher = ovpn_cfg.get("cipher", "AES-256-CBC")
         auth   = ovpn_cfg.get("auth",   "SHA256")
         tls_cipher = ovpn_cfg.get("tls-cipher", "")
+
+        # OpenVPN trata "\" como caractere de escape dentro de strings entre
+        # aspas no .ovpn -- um caminho do Windows colado direto (com \Users,
+        # \Roaming etc.) vira "Bad backslash ('\\') usage" no parser e os
+        # caminhos de ca/cert/key saem corrompidos, o que impede o túnel de
+        # subir (timeout). O próprio OpenVPN aceita "/" no lugar de "\" em
+        # caminhos no Windows, então convertemos antes de montar o config.
+        ca_path   = self.CA_FILE.replace("\\", "/")
+        cert_path = cert_file.replace("\\", "/")
 
         ovpn = f"""client
 dev tun
@@ -412,9 +463,9 @@ resolv-retry infinite
 nobind
 persist-key
 persist-tun
-ca "{self.CA_FILE}"
-cert "{cert_file}"
-key "{cert_file}"
+ca "{ca_path}"
+cert "{cert_path}"
+key "{cert_path}"
 cipher {cipher}
 auth {auth}
 verb 1
@@ -424,7 +475,7 @@ script-security 1
         if tls_cipher:
             ovpn += f"tls-cipher {tls_cipher}\n"
 
-        with open(self.OVPN_FILE, "w") as f:
+        with open(self.OVPN_FILE, "w", encoding="utf-8") as f:
             f.write(ovpn)
 
         self.log("config ready.", "green")
@@ -448,7 +499,7 @@ script-security 1
             return None
 
         try:
-            with open(self.OVPN_FILE, "r") as f:
+            with open(self.OVPN_FILE, "r", encoding="utf-8") as f:
                 base_cfg = f.read().rstrip()
         except Exception as e:
             self.log(f"failed to read base config: {e}", "red")
@@ -456,14 +507,14 @@ script-security 1
 
         lines = [
             base_cfg, "",
-            "# ── split tunneling: somente trafego do discord pela vpn ──",
+            "# -- split tunneling: somente trafego do discord pela vpn --",
             "route-nopull",
         ]
         for ip in sorted(ips):
             lines.append(f"route {ip} 255.255.255.255 vpn_gateway")
 
         try:
-            with open(self.SPLIT_OVPN_FILE, "w") as f:
+            with open(self.SPLIT_OVPN_FILE, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception as e:
             self.log(f"failed to write split config: {e}", "red")
@@ -564,14 +615,13 @@ class HyaVPN(ctk.CTk):
         self.configure(fg_color=C["bg"])
 
         # Tira a decoração nativa do Windows (a titlebar branca) pra usar a
-        # barra customizada desenhada em _build_ui. No Windows, isso por
-        # padrão tira o app da barra de tarefas -- _ensure_taskbar_icon
-        # corrige isso via WinAPI. <Map> é o evento que dispara quando a
-        # janela volta do estado minimizado (ver _minimize).
-        self.overrideredirect(True)
-        self.bind("<Map>", self._on_map_restore)
+        # barra customizada desenhada em _build_ui. Ver _setup_native_window
+        # pra entender por que isso NÃO usa overrideredirect(True) no Windows.
         if sys.platform == "win32":
-            self.after(10, self._ensure_taskbar_icon)
+            self.withdraw()  # escondida até tirarmos a decoração nativa (evita o flash já no boot)
+            self.after(10, self._setup_native_window)
+        else:
+            self.overrideredirect(True)
 
         try:
             if os.path.exists(ICON_ICO):
@@ -600,34 +650,61 @@ class HyaVPN(ctk.CTk):
         self.after(1500, lambda: threading.Thread(target=self._check_update_bg, daemon=True).start())
 
     # ── Titlebar customizada: minimizar/restaurar/taskbar (Windows) ─────────────
+    def _setup_native_window(self):
+        """Tira a titlebar/moldura nativa via WinAPI em vez de usar
+        overrideredirect(True) (que era o método antigo).
+
+        O bug do flash branco (no minimizar E no alt-tab) era causado pelo
+        overrideredirect: no Windows, ligar/desligar o overrideredirect
+        DESTRÓI E RECRIA a HWND da janela por baixo dos panos. O código
+        antigo fazia isso toda vez que minimizava (overrideredirect(False)
+        -> iconify()) e toda vez que restaurava (overrideredirect(True) nos
+        no <Map>) -- cada recriação faz o Windows desenhar por uma fração de
+        segundo a janela "nova" com a decoração branca padrão antes do
+        conteúdo customizado repintar. É exatamente esse frame branco que
+        aparece no minimizar e no alt-tab.
+        A recriação da HWND também derrubava o WS_EX_APPWINDOW aplicado no
+        boot (o antigo _ensure_taskbar_icon rodava só uma vez), o que
+        explica o app sumindo/agindo estranho na barra de tarefas depois do
+        primeiro ciclo de minimizar/restaurar -- e também é a explicação
+        mais provável pro bug de fechar a janela de settings e a janela
+        principal sumir junto (a settings, modal + overrideredirect + owner
+        window com HWND instável, ao fechar podia deixar a dona num estado
+        sem repaint -- processo continuava vivo, só a janela desaparecia).
+
+        A correção: nunca tocar em overrideredirect, nem aqui nem na janela
+        de settings (ver _strip_native_decorations). Só tiramos os bits de
+        estilo da titlebar nativa via SetWindowLongW, mantendo a mesma HWND
+        viva o tempo todo -- minimizar/restaurar/alt-tab passam a ser 100%
+        nativos do Windows (o DWM cuida da animação), sem flash e sem
+        nenhuma janela "sumindo" ao fechar uma filha.
+        """
+        if not _strip_native_decorations(self, appwindow=True):
+            # se der ruim (versão do Windows, permissão etc.), cai pro
+            # método antigo em vez de deixar a janela sem decoração e sem abrir
+            self.overrideredirect(True)
+        self.deiconify()
+
     def _minimize(self):
-        # Trick padrão pra minimizar uma janela sem decoração nativa no
-        # Windows: reativa a decoração só durante o iconify, e tira de novo
-        # quando a janela voltar (ver _on_map_restore, ligado ao evento <Map>).
-        self.overrideredirect(False)
+        # Agora é só isso -- sem tocar em overrideredirect, o Windows
+        # minimiza/restaura pela HWND real, sem flash e sem perder o estilo
+        # de taskbar aplicado em _setup_native_window.
         self.iconify()
 
-    def _on_map_restore(self, event=None):
-        if self.state() == "normal":
-            self.overrideredirect(True)
-
-    def _ensure_taskbar_icon(self):
-        """No Windows, overrideredirect(True) tira a janela da barra de
-        tarefas por padrão. Isso força de volta via WinAPI, marcando a
-        janela como WS_EX_APPWINDOW."""
+    def _on_close_request(self):
+        """Fecha de verdade. Antes, o dot de fechar ia direto pro
+        self.destroy() -- então se você fechasse o app CONECTADO, o
+        processo do openvpn.exe continuava rodando sozinho em segundo
+        plano (sem nenhuma janela associada, "invisível"): a GUI sumia mas
+        a VPN e o processo real não fechavam. Aqui a gente desconecta
+        (mata o processo do openvpn, ver VPNManager.disconnect) antes de
+        destruir a janela, então fechar o app garante que nada fica
+        rodando escondido depois."""
         try:
-            import ctypes
-            GWL_EXSTYLE = -20
-            WS_EX_APPWINDOW = 0x00040000
-            WS_EX_TOOLWINDOW = 0x00000080
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            self.withdraw()
-            self.after(10, self.deiconify)
+            self.vpn.disconnect()
         except Exception:
             pass
+        self.destroy()
 
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -643,7 +720,7 @@ class HyaVPN(ctk.CTk):
         # fechar (rosa cheio) e minimizar (rosa contorno).
         dots = tk.Canvas(self.hdr, width=52, height=46, bg=C["panel"], highlightthickness=0)
         dots.place(x=12, y=0)
-        _draw_titlebar_dots(dots, 0, on_close=self.destroy, on_minimize=self._minimize)
+        _draw_titlebar_dots(dots, 0, on_close=self._on_close_request, on_minimize=self._minimize)
 
         self.title_lbl = ctk.CTkLabel(
             self.hdr, text="hyavpn",
@@ -1093,7 +1170,7 @@ xcopy /y /e /i "{tmp_dir}\\*" "{install_dir}\\" >nul
 del "%~f0"
 """
         try:
-            with open(bat_path, "w") as f:
+            with open(bat_path, "w", encoding="utf-8") as f:
                 f.write(bat)
             self._log(f"update {info['tag']} ready — restarting...", "green")
             subprocess.Popen(["cmd", "/c", bat_path],
@@ -1112,14 +1189,25 @@ del "%~f0"
 
         # Mesma titlebar customizada da janela principal, só que com dot de
         # fechar apenas (é uma janela modal, não faz sentido minimizar).
-        w.overrideredirect(True)
+        # NÃO usa overrideredirect (ver _strip_native_decorations) -- era
+        # essa a causa mais provável de fechar a settings derrubar a janela
+        # principal junto (some da tela, processo continua no gerenciador
+        # de tarefas).
+        w.withdraw()
 
         try:
             if os.path.exists(ICON_ICO):
                 w.after(150, lambda: w.iconbitmap(ICON_ICO))  # CTkToplevel precisa de um delay no windows
         except Exception:
             pass
-        w.grab_set()
+
+        def _finish_open():
+            if not _strip_native_decorations(w, appwindow=False):
+                w.overrideredirect(True)
+            w.deiconify()
+            w.grab_set()
+
+        w.after(10, _finish_open)
 
         w_hdr = ctk.CTkFrame(w, fg_color=C["panel"], corner_radius=0, height=36)
         w_hdr.place(x=0, y=0, relwidth=1)
