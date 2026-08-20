@@ -56,15 +56,28 @@ def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
 
 
 def _make_draggable(win, widgets):
+    """Mesma técnica do app principal (ver _make_draggable em app.py):
+    coalesce dos eventos de <B1-Motion> -- só a posição mais recente do
+    mouse é aplicada por tick do mainloop (no máx. 1 geometry() por vez,
+    em vez de 1 por evento de mouse cru), pra não deixar a janela
+    "atrasada" atrás do cursor durante o arrasto."""
     drag = {"x": 0, "y": 0}
+    pending = {"x": None, "y": None, "scheduled": False}
+
+    def _apply_move():
+        pending["scheduled"] = False
+        if pending["x"] is not None:
+            win.geometry(f"+{pending['x']}+{pending['y']}")
 
     def _start(event):
         drag["x"], drag["y"] = event.x, event.y
 
     def _do_move(event):
-        x = win.winfo_pointerx() - drag["x"]
-        y = win.winfo_pointery() - drag["y"]
-        win.geometry(f"+{x}+{y}")
+        pending["x"] = event.x_root - drag["x"]
+        pending["y"] = event.y_root - drag["y"]
+        if not pending["scheduled"]:
+            pending["scheduled"] = True
+            win.after(1, _apply_move)
 
     for w in widgets:
         w.bind("<ButtonPress-1>", _start)
@@ -125,6 +138,7 @@ class Installer(tk.Tk):
         WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
         WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
         WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
+        WS_EX_COMPOSITED = 0x02000000  # double buffering nativo -- ver nota em app.py::_strip_native_decorations
         SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0004, 0x0020
         try:
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
@@ -132,7 +146,7 @@ class Installer(tk.Tk):
             style = (style & ~(WS_CAPTION | WS_THICKFRAME)) | WS_MINIMIZEBOX | WS_SYSMENU
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
             exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW | WS_EX_COMPOSITED
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)

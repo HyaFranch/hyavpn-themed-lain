@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 
 # ── Versão / Auto-update ─────────────────────────────────────────────────────
-__version__ = "1.6.7"
+__version__ = "1.0.0"
 GITHUB_REPO = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "hyavpn-dist.zip"   # nome do asset publicado em cada Release
@@ -219,12 +219,24 @@ def _strip_native_decorations(win, appwindow=False):
 
     appwindow=True dá um botão próprio na barra de tarefas + minimizar
     (usado só na janela principal). Janelas modais (settings) ficam com o
-    comportamento padrão de "dona/filha" do Windows, sem botão próprio."""
+    comportamento padrão de "dona/filha" do Windows, sem botão próprio.
+
+    Também liga WS_EX_COMPOSITED: sem WS_CAPTION, o Windows já não tem
+    mais a rotina nativa de "redesenhar a janela toda de uma vez só" que
+    uma titlebar normal aciona ao mover -- cada widget filho (canvas do
+    personagem, botões, labels, cada um sua própria sub-repintura GDI)
+    podia repintar em momentos ligeiramente diferentes durante o arrasto,
+    e por isso ficar "atrasado"/"bugado" visualmente enquanto a janela já
+    tinha se movido. WS_EX_COMPOSITED manda o Windows compor a janela
+    inteira (e todos os filhos) num buffer único fora da tela antes de
+    mostrar, então tudo aparece sincronizado em cada frame -- efeito de
+    double buffering nativo, sem custo nenhum de código nosso."""
     import ctypes
     GWL_STYLE, GWL_EXSTYLE = -16, -20
     WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
     WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
+    WS_EX_COMPOSITED = 0x02000000
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0004, 0x0020
     try:
         hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
@@ -235,10 +247,11 @@ def _strip_native_decorations(win, appwindow=False):
             style |= WS_MINIMIZEBOX
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
 
+        exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        exstyle |= WS_EX_COMPOSITED
         if appwindow:
-            exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
 
         ctypes.windll.user32.SetWindowPos(
             hwnd, 0, 0, 0, 0, 0,
