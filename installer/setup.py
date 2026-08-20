@@ -35,6 +35,22 @@ OPENVPN_MSI = os.path.join(tempfile.gettempdir(), "openvpn-setup.msi")
 DIST_ZIP_TMP = os.path.join(tempfile.gettempdir(), "hyavpn-dist.zip")
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Cria um contexto SSL usando o bundle de CAs do certifi.
+
+    Corrige `[SSL: CERTIFICATE_VERIFY_FAILED] ... unable to get local issuer
+    certificate` em PCs onde o keystore de certificados do Windows está
+    desatualizado/incompleto — `ssl.create_default_context()` sozinho depende
+    dele. Com o cacert.pem do certifi a verificação passa a ser independente
+    do sistema.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def resource_path(relative_path: str) -> str:
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     # When running as script, icons/ is one level up (repo root)
@@ -286,7 +302,7 @@ class InstallerApi:
         self._log(f"install dir: {INSTALL_DIR}", "dim")
 
     def _github_get(self, url, timeout, retries=3):
-        ctx      = ssl.create_default_context()
+        ctx      = _ssl_context()
         last_err = None
         for attempt in range(1, retries + 1):
             req = urllib.request.Request(url, headers={"User-Agent": "hyavpn-installer"})
@@ -353,7 +369,7 @@ class InstallerApi:
             return
         self._skip_openvpn = False
         self._log("downloading openvpn...", "dim")
-        ctx = ssl.create_default_context()
+        ctx = _ssl_context()
         # urlretrieve manda o User-Agent padrão do Python (Python-urllib/x.y),
         # e o Cloudflare do swupdate.openvpn.org bloqueia isso com 403.
         # Usando Request com um User-Agent normal, igual o resto do arquivo já faz.
