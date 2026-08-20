@@ -431,7 +431,7 @@ def main():
         html             = INSTALLER_HTML,
         js_api           = api,
         width            = 500,
-        height           = 436,
+        height           = 476,
         resizable        = False,
         frameless        = True,
         background_color = "#000000",
