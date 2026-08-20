@@ -523,6 +523,8 @@
   .stg-btn-green:hover { background: #001a08; }
   .stg-btn-grey  { border-color: var(--grey);    color: var(--grey); }
   .stg-btn-grey:hover  { background: #0a0005; }
+  .stg-btn-red   { border-color: var(--red);     color: var(--red); }
+  .stg-btn-red:hover   { background: #1a0005; }
 
   /* credits */
   .credits {
@@ -668,6 +670,9 @@
         "no matter where you go,<br>everyone is connected."
       </div>
 
+      <div class="stg-divider"></div>
+
+      <button class="stg-btn stg-btn-red" onclick="uninstallApp()">[ UNINSTALL ]</button>
       <button class="stg-btn stg-btn-grey" onclick="closeSettings()">[ CLOSE ]</button>
     </div>
   </div>
@@ -859,6 +864,15 @@ function refreshConfig() {
 function checkUpdates() {
   pywebview.api.check_updates();
   closeSettings();
+}
+
+function uninstallApp() {
+  if (!confirm('desinstalar hyavpn?\n\nisso vai apagar as configs, os certificados e a pasta de instalação. essa ação não pode ser desfeita.')) {
+    return;
+  }
+  addLog('desinstalando...', 'red');
+  closeSettings();
+  pywebview.api.uninstall();
 }
 
 function onUpdateClick() {

@@ -5,6 +5,7 @@ Pillow>=10.0.0
 psutil>=5.9.0
 pygame>=2.5.0
 pyinstaller>=6.0.0
+certifi>=2024.2.2
 
 # pywebview no Windows usa WebView2 (Chromium) por padrão.
 # Para desenvolvimento, também instale o runtime WebView2 (já vem no Windows 11;

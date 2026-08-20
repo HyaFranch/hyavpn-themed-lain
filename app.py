@@ -13,6 +13,7 @@ import math
 import base64
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -28,6 +29,24 @@ UPDATE_ASSET_NAME  = "hyavpn-dist.zip"
 # ── Instância única ──────────────────────────────────────────────────────────
 _SINGLE_INSTANCE_PORT   = 51737
 _single_instance_socket = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Cria um contexto SSL usando o bundle de CAs do certifi.
+
+    Corrige o erro `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify
+    failed: unable to get local issuer certificate`. Ele acontece porque o
+    Python embutido no .exe do PyInstaller usa `ssl.create_default_context()`,
+    que no Windows depende do keystore de certificados do sistema — e esse
+    keystore muitas vezes não tem (ou o processo empacotado não enxerga) a CA
+    raiz necessária pra validar o certificado do GitHub/riseup.net. Usar o
+    cacert.pem do pacote `certifi` resolve isso de forma independente do SO.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def resource_path(relative_path: str) -> str:
@@ -80,8 +99,8 @@ def _version_tuple(v: str):
 
 
 def check_for_update():
-    import urllib.request, ssl
-    ctx = ssl.create_default_context()
+    import urllib.request
+    ctx = _ssl_context()
     try:
         req = urllib.request.Request(GITHUB_API_LATEST, headers={"User-Agent": "hyavpn-updater"})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
@@ -168,8 +187,8 @@ class VPNManager:
         return False
 
     def setup(self) -> bool:
-        import urllib.request, ssl
-        ctx  = ssl.create_default_context()
+        import urllib.request
+        ctx  = _ssl_context()
 
         self.log("fetching provider.json...", "pink")
         try:
@@ -564,6 +583,97 @@ class JsApi:
     def reset_to_idle(self):
         self._set_state("idle")
 
+    def _get_desktop_path(self):
+        """Resolve o caminho real da área de trabalho (mesma lógica do installer)."""
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            )
+            raw, _ = winreg.QueryValueEx(key, "Desktop")
+            winreg.CloseKey(key)
+            path = os.path.expandvars(raw)
+            if path:
+                return path
+        except Exception:
+            pass
+        return os.path.join(os.environ.get("USERPROFILE", "."), "Desktop")
+
+    # ── Uninstall ────────────────────────────────────────────────────────────
+    def uninstall(self):
+        """Desinstala o hyavpn: derruba a vpn, apaga configs e remove a pasta
+        de instalação. A confirmação deve ser feita no JS (confirm()) antes
+        de chamar pywebview.api.uninstall(), já que aqui é irreversível."""
+        threading.Thread(target=self._do_uninstall, daemon=True).start()
+
+    def _do_uninstall(self):
+        self._log("desinstalando hyavpn...", "red")
+
+        try:
+            if self._vpn:
+                self._vpn.disconnect()
+        except Exception:
+            pass
+
+        # mata qualquer openvpn.exe residual
+        try:
+            import psutil
+            for p in psutil.process_iter(["name"]):
+                try:
+                    if "openvpn" in p.info["name"].lower():
+                        p.terminate()
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+
+        # remove configs/certs (%APPDATA%\hyavpn)
+        try:
+            if self._vpn and os.path.isdir(self._vpn.CONFIG_DIR):
+                shutil.rmtree(self._vpn.CONFIG_DIR, ignore_errors=True)
+        except Exception as e:
+            self._log(f"falha ao remover configs: {e}", "red")
+
+        # remove o atalho criado pelo installer na área de trabalho
+        try:
+            desktop = self._get_desktop_path()
+            lnk = os.path.join(desktop, "hyavpn.lnk")
+            if os.path.exists(lnk):
+                os.remove(lnk)
+        except Exception as e:
+            self._log(f"falha ao remover atalho: {e}", "dim")
+
+        if getattr(sys, "frozen", False):
+            install_dir = os.path.dirname(sys.executable)
+        else:
+            install_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # apaga a pasta de instalação depois que o processo fechar
+        # (mesmo truque do auto-update: um .bat espera o pid morrer)
+        pid      = os.getpid()
+        bat_path = os.path.join(tempfile.gettempdir(), "hyavpn_uninstall.bat")
+        bat = (
+            f"@echo off\n:wait\n"
+            f'tasklist /fi "PID eq {pid}" | find "{pid}" >nul\n'
+            "if not errorlevel 1 (\n  timeout /t 1 /nobreak >nul\n  goto wait\n)\n"
+            f'rmdir /s /q "{install_dir}"\n'
+            f"del \"%~f0\"\n"
+        )
+        try:
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write(bat)
+            self._log("hyavpn será removido e o app vai fechar...", "green")
+            subprocess.Popen(
+                ["cmd", "/c", bat_path],
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            time.sleep(0.6)
+            if self._win:
+                self._win.destroy()
+        except Exception as e:
+            self._log(f"falha ao desinstalar: {e}", "red")
+
     # ── Update ────────────────────────────────────────────────────────────────
     def check_updates(self):
         self._log("checking for updates...", "pink")
@@ -591,13 +701,13 @@ class JsApi:
         threading.Thread(target=self._do_apply_update, args=(self._update_info,), daemon=True).start()
 
     def _do_apply_update(self, info):
-        import urllib.request, ssl
+        import urllib.request
         asset_url = info["asset_url"]
         tmp_zip   = os.path.join(tempfile.gettempdir(), "hyavpn_update.zip")
         tmp_dir   = os.path.join(tempfile.gettempdir(), "hyavpn_update_extract")
 
         try:
-            ctx = ssl.create_default_context()
+            ctx = _ssl_context()
             req = urllib.request.Request(asset_url, headers={"User-Agent": "hyavpn-updater"})
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r, open(tmp_zip, "wb") as f:
                 shutil.copyfileobj(r, f)
