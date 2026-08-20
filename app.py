@@ -20,7 +20,7 @@ import time
 import zipfile
 
 # ── Versão / Auto-update ─────────────────────────────────────────────────────
-__version__ = "1.0.0"
+__version__ = "1.6.7"
 GITHUB_REPO        = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST  = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET_NAME  = "hyavpn-dist.zip"
