@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hyavpn</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #000000;
+    --panel:     #0a0005;
+    --border:    #3d0028;
+    --pink:      #ff2d78;
+    --pink2:     #c4005a;
+    --pink-dim:  #5a0030;
+    --green:     #00ff41;
+    --green2:    #00b32c;
+    --white:     #f0d0dc;
+    --grey:      #3a1a28;
+    --dim:       #4a2535;
+    --red:       #ff0033;
+    --font:      'Courier New', 'Courier', monospace;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--white);
+    font-family: var(--font);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* ── Titlebar (draggable) ──────────────────────────────────────────── */
+  #titlebar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 46px;
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    z-index: 100;
+    /* pywebview drag region */
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+
+  /* dots must NOT be drag region so clicks register */
+  .tb-dots {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+
+  .dot-btn {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    transition: filter 0.15s;
+    outline: none;
+  }
+  .dot-close  { background: var(--pink); }
+  .dot-close:hover  { background: var(--red); }
+  .dot-mini   { background: transparent; border: 2px solid var(--pink-dim); }
+  .dot-mini:hover   { border-color: var(--pink); }
+
+  .tb-title {
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--pink);
+    letter-spacing: 2px;
+    padding-left: 4px;
+  }
+
+  .tb-sub {
+    font-size: 8px;
+    color: var(--dim);
+    margin-left: 10px;
+    margin-top: 6px;
+    align-self: flex-end;
+    margin-bottom: 10px;
+  }
+
+  #btn-settings {
+    margin-left: auto;
+    margin-right: 10px;
+    background: transparent;
+    border: none;
+    color: var(--pink-dim);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 2px;
+    transition: color 0.15s, background 0.15s;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+    font-family: var(--font);
+  }
+  #btn-settings:hover { color: var(--pink); background: var(--border); }
+
+  /* ── Background canvas ─────────────────────────────────────────────── */
+  #bg-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── Main layout ───────────────────────────────────────────────────── */
+  #app {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 54px; /* below titlebar */
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Character area ────────────────────────────────────────────────── */
+  #char-wrap {
+    width: 220px; height: 220px;
+    position: relative;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+
+  #char-img {
+    width: 100%; height: 100%;
+    object-fit: contain;
+    image-rendering: pixelated;
+    transition: opacity 0.2s;
+  }
+
+  /* glitch filter on char during connecting */
+  .glitching #char-img {
+    animation: char-glitch 0.15s steps(1) infinite;
+  }
+  @keyframes char-glitch {
+    0%   { filter: none; transform: translate(0,0); }
+    20%  { filter: hue-rotate(90deg) saturate(3); transform: translate(-2px, 1px); }
+    40%  { filter: none; transform: translate(1px,-1px); }
+    60%  { filter: brightness(2) hue-rotate(180deg); transform: translate(0,0); }
+    80%  { filter: none; transform: translate(2px,0); }
+    100% { filter: none; transform: translate(0,0); }
+  }
+
+  /* ── Status pill ───────────────────────────────────────────────────── */
+  #status-box {
+    width: 408px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px 8px 38px;
+    position: relative;
+    flex-shrink: 0;
+    margin-top: 10px;
+  }
+
+  #status-dot {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--grey);
+    transition: background 0.3s;
+  }
+
+  #status-main {
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: var(--dim);
+    transition: color 0.3s;
+  }
+
+  #status-sub {
+    font-size: 8px;
+    color: var(--grey);
+    margin-top: 2px;
+    min-height: 12px;
+  }
+
+  /* ── Main button ───────────────────────────────────────────────────── */
+  #btn-bypass {
+    width: 408px;
+    height: 60px;
+    margin-top: 12px;
+    background: var(--panel);
+    border: 1px solid var(--pink);
+    border-radius: 2px;
+    color: var(--pink);
+    font-family: var(--font);
+    font-size: 14px;
+    font-weight: bold;
+    letter-spacing: 3px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  #btn-bypass::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,45,120,0.07), transparent);
+    transform: translateX(-100%);
+    transition: transform 0.4s;
+  }
+  #btn-bypass:hover:not(:disabled)::before { transform: translateX(100%); }
+  #btn-bypass:hover:not(:disabled) {
+    background: #150008;
+    box-shadow: 0 0 18px rgba(255,45,120,0.25);
+  }
+  #btn-bypass:disabled {
+    border-color: var(--grey);
+    color: var(--grey);
+    cursor: default;
+  }
+
+  /* pulse ring when connecting */
+  .connecting #btn-bypass:disabled {
+    animation: btn-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes btn-pulse {
+    0%, 100% { box-shadow: 0 0 0px rgba(255,45,120,0); }
+    50%       { box-shadow: 0 0 20px rgba(255,45,120,0.3); }
+  }
+
+  /* ── Terminal ──────────────────────────────────────────────────────── */
+  #terminal-wrap {
+    width: 408px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    margin-top: 12px;
+    flex-shrink: 0;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .term-label {
+    font-size: 8px;
+    color: var(--pink-dim);
+    padding: 5px 10px 3px;
+    letter-spacing: 1px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #terminal {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 10px 8px;
+    font-size: 9px;
+    line-height: 1.6;
+    scroll-behavior: smooth;
+  }
+  #terminal::-webkit-scrollbar { width: 4px; }
+  #terminal::-webkit-scrollbar-track { background: transparent; }
+  #terminal::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-line { display: block; white-space: pre-wrap; word-break: break-all; }
+  .log-line .ts { color: var(--dim); }
+  .c-pink  { color: var(--pink); }
+  .c-green { color: var(--green); }
+  .c-red   { color: var(--red); }
+  .c-dim   { color: var(--dim); }
+  .c-white { color: var(--white); }
+
+  /* ── Success overlay ───────────────────────────────────────────────── */
+  #overlay {
+    position: fixed;
+    inset: 46px 0 0 0;
+    background: var(--bg);
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s;
+  }
+  #overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  #overlay canvas {
+    display: block;
+  }
+
+  #overlay h2 {
+    font-size: 20px;
+    font-weight: bold;
+    color: var(--pink);
+    letter-spacing: 3px;
+    margin-top: 12px;
+  }
+
+  #overlay p {
+    font-size: 10px;
+    color: var(--white);
+    text-align: center;
+    margin-top: 6px;
+    line-height: 1.8;
+  }
+
+  #overlay button {
+    margin-top: 20px;
+    width: 140px; height: 40px;
+    background: var(--panel);
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #overlay button:hover { background: #001a08; }
+
+  /* ── Settings panel ────────────────────────────────────────────────── */
+  #settings-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s;
+    backdrop-filter: blur(2px);
+  }
+  #settings-panel.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  #settings-box {
+    width: 340px;
+    max-height: 560px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transform: translateY(8px);
+    transition: transform 0.25s;
+  }
+  #settings-panel.visible #settings-box { transform: translateY(0); }
+
+  .stg-header {
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    height: 36px;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
+  .stg-dot-close {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--pink);
+    border: none;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .stg-dot-close:hover { background: var(--red); }
+
+  .stg-title {
+    font-size: 9px;
+    color: var(--dim);
+    margin-left: 4px;
+    letter-spacing: 1px;
+  }
+
+  .stg-body {
+    overflow-y: auto;
+    padding: 0 24px 20px;
+    flex: 1;
+  }
+  .stg-body::-webkit-scrollbar { width: 4px; }
+  .stg-body::-webkit-scrollbar-track { background: transparent; }
+  .stg-body::-webkit-scrollbar-thumb { background: var(--border); }
+
+  .stg-section-title {
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--pink);
+    letter-spacing: 2px;
+    padding: 20px 0 4px;
+    text-align: center;
+  }
+
+  .stg-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 12px 0;
+  }
+
+  .stg-label {
+    font-size: 8px;
+    color: var(--dim);
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  /* slider */
+  #delay-slider {
+    width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    outline: none;
+    cursor: pointer;
+  }
+  #delay-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--pink);
+    cursor: pointer;
+    box-shadow: 0 0 6px rgba(255,45,120,0.4);
+  }
+  #delay-val {
+    font-size: 9px;
+    color: var(--pink);
+    text-align: right;
+    margin-top: 4px;
+  }
+
+  /* toggle row */
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 12px 0 4px;
+  }
+  .toggle-label {
+    font-size: 10px;
+    color: var(--white);
+    letter-spacing: 1px;
+  }
+
+  /* iOS-style toggle */
+  .toggle-switch {
+    position: relative;
+    width: 38px; height: 20px;
+    flex-shrink: 0;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: var(--grey);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.25s;
+  }
+  .toggle-track::after {
+    content: '';
+    position: absolute;
+    left: 2px; top: 2px;
+    width: 16px; height: 16px;
+    background: var(--white);
+    border-radius: 50%;
+    transition: transform 0.25s;
+  }
+  .toggle-switch input:checked + .toggle-track { background: var(--pink); }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); }
+
+  .toggle-hint {
+    font-size: 8px;
+    color: var(--dim);
+    line-height: 1.6;
+    margin-bottom: 12px;
+  }
+
+  /* settings buttons */
+  .stg-btn {
+    display: block;
+    width: 100%;
+    padding: 9px 0;
+    background: var(--panel);
+    border: 1px solid;
+    border-radius: 2px;
+    font-family: var(--font);
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    cursor: pointer;
+    text-align: center;
+    margin-bottom: 8px;
+    transition: background 0.2s;
+  }
+  .stg-btn-pink  { border-color: var(--pink-dim); color: var(--pink-dim); }
+  .stg-btn-pink:hover  { background: #0f0009; }
+  .stg-btn-green { border-color: var(--green2);  color: var(--green2); }
+  .stg-btn-green:hover { background: #001a08; }
+  .stg-btn-grey  { border-color: var(--grey);    color: var(--grey); }
+  .stg-btn-grey:hover  { background: #0a0005; }
+
+  /* credits */
+  .credits {
+    text-align: center;
+    font-size: 8px;
+    color: var(--white);
+    line-height: 2;
+    padding: 4px 0 8px;
+  }
+
+  /* ── Update badge ──────────────────────────────────────────────────── */
+  #update-badge {
+    position: fixed;
+    top: 50px;
+    right: 10px;
+    background: var(--panel);
+    border: 1px solid var(--pink);
+    border-radius: 2px;
+    padding: 4px 10px;
+    font-size: 8px;
+    color: var(--pink);
+    letter-spacing: 1px;
+    z-index: 90;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+    animation: badge-blink 2s ease-in-out infinite;
+  }
+  #update-badge.visible { opacity: 1; pointer-events: auto; }
+  @keyframes badge-blink {
+    0%, 100% { box-shadow: 0 0 0 rgba(255,45,120,0); }
+    50%       { box-shadow: 0 0 10px rgba(255,45,120,0.4); }
+  }
+
+  /* ── State classes applied to #app ────────────────────────────────── */
+  /* connecting */
+  body.connecting #status-dot { background: var(--pink); }
+  body.connecting #status-main { color: var(--pink); }
+
+  /* connected */
+  body.connected #status-dot { background: var(--green); }
+  body.connected #status-main { color: var(--pink); }
+
+  /* success */
+  body.success #status-dot { background: var(--green); }
+  body.success #status-main { color: var(--green); }
+
+  /* idle */
+  body.idle #status-dot { background: var(--grey); }
+  body.idle #status-main { color: var(--dim); }
+</style>
+</head>
+<body class="idle">
+
+<!-- Background canvas (grid + scanline + particles) -->
+<canvas id="bg-canvas"></canvas>
+
+<!-- Titlebar -->
+<div id="titlebar">
+  <div class="tb-dots">
+    <button class="dot-btn dot-close" onclick="pywebview.api.close_window()" title="close"></button>
+    <button class="dot-btn dot-mini"  onclick="pywebview.api.minimize_window()" title="minimize"></button>
+  </div>
+  <span class="tb-title" id="title-lbl">hyavpn</span>
+  <span class="tb-sub" id="version-lbl">v0.0.0 // by hyafranch</span>
+  <button id="btn-settings" onclick="openSettings()">⚙</button>
+</div>
+
+<!-- Main content -->
+<div id="app">
+
+  <!-- Character -->
+  <div id="char-wrap">
+    <img id="char-img" src="" alt="">
+  </div>
+
+  <!-- Status -->
+  <div id="status-box">
+    <div id="status-dot"></div>
+    <div id="status-main">STANDBY // NOT CONNECTED</div>
+    <div id="status-sub"></div>
+  </div>
+
+  <!-- Bypass button -->
+  <button id="btn-bypass" onclick="onBypass()">[ AUTO BYPASS ]</button>
+
+  <!-- Terminal -->
+  <div id="terminal-wrap">
+    <div class="term-label">// SYSTEM LOG</div>
+    <div id="terminal"></div>
+  </div>
+
+</div>
+
+<!-- Success overlay -->
+<div id="overlay">
+  <canvas id="ov-canvas" width="440" height="220"></canvas>
+  <h2>// STREAM ENABLED //</h2>
+  <p>vpn disconnected. your ip changed context.<br>you can now go live on discord.</p>
+  <button onclick="closeOverlay()">[ OK ]</button>
+</div>
+
+<!-- Settings panel -->
+<div id="settings-panel" onclick="if(event.target===this)closeSettings()">
+  <div id="settings-box">
+    <div class="stg-header">
+      <button class="stg-dot-close" onclick="closeSettings()"></button>
+      <span class="stg-title">settings</span>
+    </div>
+    <div class="stg-body">
+      <div class="stg-section-title">// SETTINGS</div>
+      <div class="stg-divider"></div>
+
+      <div class="stg-label">DISCORD RESTART DELAY (s)</div>
+      <input type="range" id="delay-slider" min="2" max="30" step="1" value="10"
+             oninput="document.getElementById('delay-val').textContent=this.value+'s'; pywebview.api.set_delay(parseInt(this.value))">
+      <div id="delay-val">10s</div>
+
+      <div class="stg-divider"></div>
+
+      <div class="toggle-row">
+        <span class="toggle-label">split tunneling</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-split" onchange="onSplitToggle(this)">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="toggle-hint">only discord's traffic uses the tunnel;<br>everything else stays on your normal connection.</div>
+
+      <div class="stg-divider"></div>
+
+      <button class="stg-btn stg-btn-pink" onclick="refreshConfig()">[ REFRESH VPN CONFIG ]</button>
+      <button class="stg-btn stg-btn-green" onclick="checkUpdates()">[ CHECK FOR UPDATES ]</button>
+
+      <div class="stg-divider"></div>
+
+      <div class="stg-section-title" style="font-size:12px">// CREDITS</div>
+      <div class="credits">
+        hyavpn<br>by hyafranch<br><br>
+        servers by riseup.net<br>
+        inspired by serial experiments lain<br><br>
+        "no matter where you go,<br>everyone is connected."
+      </div>
+
+      <button class="stg-btn stg-btn-grey" onclick="closeSettings()">[ CLOSE ]</button>
+    </div>
+  </div>
+</div>
+
+<!-- Update badge -->
+<div id="update-badge" onclick="onUpdateClick()">▲ UPDATE AVAILABLE</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let _state = 'idle';
+let _glitching = false;
+let _animFrame = null;
+let _ovAnimFrame = null;
+let _ovT = 0;
+let _scanY = 0;
+let _bgT = 0;
+let _bgAnimId = null;
+let _charExpr = 'idle';
+
+// Asset paths injected by Python before loading
+const ASSETS = window._HYAVPN_ASSETS || {
+  idle:       'assets/idle.gif',
+  connecting: 'assets/connecting.gif',
+  connected:  'assets/connected.gif',
+};
+const VERSION = window._HYAVPN_VERSION || '0.0.0';
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('version-lbl').textContent = `v${VERSION} // by hyafranch`;
+  setChar('idle');
+  startBg();
+  // fetch split pref
+  pywebview.api.get_split_tunnel().then(v => {
+    document.getElementById('toggle-split').checked = v;
+  });
+});
+
+// ── Background animation ───────────────────────────────────────────────────────
+function startBg() {
+  const canvas = document.getElementById('bg-canvas');
+  const ctx = canvas.getContext('2d');
+  function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const C = {
+    grid:   '#1a0010',
+    pink:   '#ff2d78',
+    pink2:  '#c4005a',
+    scan:   'rgba(255,45,120,0.06)',
+  };
+
+  function frame() {
+    _bgT += 0.035;
+    _scanY = (_scanY + 2) % canvas.height;
+    const W = canvas.width, H = canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 44) {
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+    }
+    for (let y = 0; y < H; y += 44) {
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+    }
+
+    // Scanline
+    const grad = ctx.createLinearGradient(0, _scanY, 0, _scanY + 3);
+    grad.addColorStop(0, 'rgba(255,45,120,0.12)');
+    grad.addColorStop(1, 'rgba(255,45,120,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, _scanY, W, 4);
+
+    // Particles
+    for (let i = 0; i < 8; i++) {
+      const px = (i*55 + 30*Math.sin(_bgT*0.8+i)) % W;
+      const py = (i*80 + 25*Math.cos(_bgT*0.6+i*1.3)) % H;
+      const sz = 1 + Math.abs(Math.sin(_bgT + i)) * 2;
+      ctx.beginPath();
+      ctx.arc(px, py, sz, 0, Math.PI*2);
+      ctx.fillStyle = i%2===0 ? C.pink : C.pink2;
+      ctx.fill();
+    }
+
+    _bgAnimId = requestAnimationFrame(frame);
+  }
+  frame();
+
+  // Glitch title
+  const KANA = 'アイウエオカキクケコサシスセソタチ01ﾊﾋﾌﾍﾎｦｧ';
+  setInterval(() => {
+    const lbl = document.getElementById('title-lbl');
+    if (_glitching) {
+      lbl.textContent = 'hyavpn'.split('').map(c =>
+        c !== ' ' && Math.random() < 0.25 ? KANA[Math.floor(Math.random()*KANA.length)] : c
+      ).join('');
+    } else {
+      lbl.textContent = 'hyavpn';
+    }
+  }, 80);
+}
+
+// ── Character ──────────────────────────────────────────────────────────────────
+function setChar(expr) {
+  _charExpr = expr;
+  const img = document.getElementById('char-img');
+  img.src = ASSETS[expr] || ASSETS.idle;
+  const wrap = document.getElementById('char-wrap');
+  wrap.className = _glitching ? 'glitching' : '';
+}
+
+// ── State management ───────────────────────────────────────────────────────────
+function setState(s) {
+  _state = s;
+  document.body.className = s;
+
+  const statusMain = document.getElementById('status-main');
+  const statusSub  = document.getElementById('status-sub');
+  const btn        = document.getElementById('btn-bypass');
+
+  switch(s) {
+    case 'idle':
+      statusMain.textContent = 'STANDBY // NOT CONNECTED';
+      statusSub.textContent  = '';
+      btn.disabled = false;
+      _glitching = false;
+      document.getElementById('char-wrap').className = '';
+      setChar('idle');
+      break;
+
+    case 'connecting':
+      statusMain.textContent = 'CONNECTING // ESTABLISHING TUNNEL';
+      pywebview.api.get_split_tunnel().then(v => {
+        statusSub.textContent = v
+          ? 'routing through riseup (split: discord only)'
+          : 'routing through riseup (full tunnel)';
+      });
+      btn.disabled = true;
+      _glitching = true;
+      document.getElementById('char-wrap').className = 'glitching';
+      setChar('connecting');
+      break;
+
+    case 'connected':
+      statusMain.textContent = 'TUNNEL ACTIVE // RESTARTING DISCORD';
+      statusSub.textContent  = 'changing ip context...';
+      _glitching = false;
+      document.getElementById('char-wrap').className = '';
+      setChar('connected');
+      break;
+
+    case 'success':
+      statusMain.textContent = 'BYPASS COMPLETE // STREAM ENABLED';
+      statusSub.textContent  = 'go live on discord';
+      _glitching = false;
+      document.getElementById('char-wrap').className = '';
+      setChar('connected');
+      showOverlay();
+      break;
+  }
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────────
+function onBypass() {
+  if (_state !== 'idle') return;
+  pywebview.api.start_bypass();
+}
+
+function onSplitToggle(el) {
+  pywebview.api.set_split_tunnel(el.checked);
+  addLog(
+    el.checked
+      ? 'split tunneling ON — only discord goes through the vpn.'
+      : 'split tunneling OFF — full tunnel.',
+    'pink'
+  );
+}
+
+function refreshConfig() {
+  pywebview.api.refresh_config();
+  closeSettings();
+}
+
+function checkUpdates() {
+  pywebview.api.check_updates();
+  closeSettings();
+}
+
+function onUpdateClick() {
+  pywebview.api.apply_update();
+}
+
+// ── Log ────────────────────────────────────────────────────────────────────────
+function addLog(msg, color) {
+  const term = document.getElementById('terminal');
+  const now  = new Date();
+  const ts   = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+  const line = document.createElement('span');
+  line.className = `log-line c-${color || 'dim'}`;
+  line.innerHTML = `<span class="ts">[${ts}]</span> ${escHtml(msg)}`;
+  term.appendChild(line);
+  term.scrollTop = term.scrollHeight;
+
+  // keep last 200 lines
+  while (term.children.length > 200) term.removeChild(term.firstChild);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Overlay (success) ──────────────────────────────────────────────────────────
+function showOverlay() {
+  const ov = document.getElementById('overlay');
+  ov.classList.add('visible');
+  _ovT = 0;
+  animOverlay();
+}
+
+function closeOverlay() {
+  document.getElementById('overlay').classList.remove('visible');
+  cancelAnimationFrame(_ovAnimFrame);
+  pywebview.api.reset_to_idle();
+}
+
+function animOverlay() {
+  _ovT += 0.06;
+  const canvas = document.getElementById('ov-canvas');
+  const ctx    = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2;
+
+  ctx.clearRect(0,0,W,H);
+
+  for (let ring=0; ring<4; ring++) {
+    const r = 20 + ring*18 + 10*Math.abs(Math.sin(_ovT + ring*0.5));
+    const alpha = (200 - ring*40) / 255;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.strokeStyle = `rgba(255,45,120,${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  for (let i=0; i<12; i++) {
+    const angle = (i/12)*Math.PI*2 + _ovT;
+    const r1=55, r2=70;
+    ctx.beginPath();
+    ctx.moveTo(cx + r1*Math.cos(angle), cy + r1*Math.sin(angle));
+    ctx.lineTo(cx + r2*Math.cos(angle), cy + r2*Math.sin(angle));
+    ctx.strokeStyle = 'rgba(255,45,120,0.7)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  if (document.getElementById('overlay').classList.contains('visible'))
+    _ovAnimFrame = requestAnimationFrame(animOverlay);
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────────
+function openSettings() {
+  document.getElementById('settings-panel').classList.add('visible');
+}
+function closeSettings() {
+  document.getElementById('settings-panel').classList.remove('visible');
+}
+
+// ── Update badge ───────────────────────────────────────────────────────────────
+function showUpdateBadge() {
+  document.getElementById('update-badge').classList.add('visible');
+}
+function hideUpdateBadge() {
+  document.getElementById('update-badge').classList.remove('visible');
+}
+
+// ── Python → JS API (called from Python side) ──────────────────────────────────
+window.hyavpn = {
+  setState,
+  addLog,
+  showOverlay,
+  showUpdateBadge,
+  hideUpdateBadge,
+};
+</script>
+</body>
+</html>

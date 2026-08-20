@@ -45,6 +45,7 @@ jobs:
           Copy-Item -Recurse assets dist_package\assets
           Copy-Item -Recurse audio dist_package\audio
           Copy-Item -Recurse icons dist_package\icons
+          Copy-Item -Recurse ui dist_package\ui
           Compress-Archive -Path dist_package\* -DestinationPath hyavpn-dist.zip -Force
 
       - name: Build installer exe with PyInstaller

@@ -1,103 +1,45 @@
-# hyavpn — notas de desenvolvimento
+# hyavpn — notas de desenvolvimento (pywebview edition)
 
 Documentação técnica pra quem for mexer no código, compilar manualmente
-ou publicar uma versão nova. Se você só quer usar o app, veja o
-[README.md](README.md).
+ou publicar uma versão nova. Se você só quer usar o app, veja o [README.md](README.md).
 
 ---
 
-## Como funciona o build (visão geral)
+## Mudanças em relação à versão customtkinter
 
-O usuário final nunca clona o repo nem instala Python — ele baixa
-**só o `hyavpn-setup.exe`**, compilado, sem depender de nada instalado
-na máquina.
+A UI foi reescrita completamente usando **pywebview** no lugar de customtkinter.
 
-O que o `hyavpn-setup.exe` faz ao abrir:
+| Aspecto | customtkinter (antigo) | pywebview (atual) |
+|---|---|---|
+| Renderer | Tkinter/GDI+ | WebView2/Chromium (Windows) |
+| Arrasto de janela | Hack via WinAPI (`WS_EX_COMPOSITED`, `WS_NCLBUTTONDOWN`) | CSS `-webkit-app-region: drag` nativo |
+| Titlebar flash | Exigia workaround com `_strip_native_decorations` | Resolvido nativamente com `frameless=True` |
+| Estilo | Python (paleta `C = {...}`, widgets CTk) | HTML/CSS (variáveis CSS, transições, animações) |
+| Personagem GIF | PIL + `ImageSequence` rodando em timer Tkinter | `<img src="...gif">` — o browser anima |
+| Performance scroll | Nenhuma | GPU composited pelo Chromium |
+| Fundo animado | Canvas Tkinter + `after(50ms)` | Canvas Web + `requestAnimationFrame` |
 
-1. Já pede elevação de administrador sozinho (UAC) — compilado com
-   `--uac-admin`.
-2. Consulta o **último Release no GitHub** (`/releases/latest`).
-3. Baixa o asset `hyavpn-dist.zip` desse release — contém o `hyavpn.exe`
-   já compilado, mais as pastas `assets/`, `audio/` e `icons/`.
-4. Extrai tudo em `C:\Program Files\hyavpn`.
-5. Instala o OpenVPN (se ainda não tiver).
-6. Cria o atalho no Desktop apontando pro `hyavpn.exe`, com o ícone certo.
-
-Tanto o `hyavpn.exe` (app) quanto o `hyavpn-setup.exe` (instalador) são
-**buildados automaticamente** pelo GitHub Actions
-(`.github/workflows/release.yml`) toda vez que você cria uma tag `vX.Y.Z`.
-
----
-
-## Publicando uma nova versão
-
-1. Atualize `__version__` em `app.py` (ex: `"1.1.0"`).
-2. Commit e push.
-3. Crie e envie a tag:
-   ```
-   git tag v1.1.0
-   git push origin v1.1.0
-   ```
-4. O GitHub Actions builda o `hyavpn.exe` (app) e o `hyavpn-setup.exe`
-   (instalador), empacota `hyavpn-dist.zip` (exe + assets + audio + icons)
-   e publica os dois como assets do Release automaticamente.
-
-Pronto — o instalador (pra quem for instalar do zero) e o próprio app
-(pra quem já tem instalado, via checagem de update) já vão enxergar essa
-versão nova.
-
----
-
-## Auto-update (implementação)
-
-O app checa a versão mais recente no GitHub automaticamente ao abrir
-(sem travar a UI) e também tem um botão **[ CHECK FOR UPDATES ]** nas
-Settings. Se achar uma versão nova:
-
-- Baixa o `hyavpn-dist.zip` do release mais recente.
-- Extrai numa pasta temporária.
-- Agenda a substituição dos arquivos via um script auxiliar que espera o
-  processo atual fechar (o Windows não deixa sobrescrever um `.exe`
-  rodando), copia os arquivos novos por cima, e reabre o app.
-
-Configs/certificados da VPN ficam em `%APPDATA%\hyavpn`, fora da pasta de
-instalação — então um update nunca apaga a config atual.
-
----
-
-## Instância única
-
-O app usa uma trava local (bind numa porta fixa em `127.0.0.1`) pra impedir
-abrir uma segunda instância — evita rodar duas VPNs/túneis OpenVPN ao mesmo
-tempo, brigando entre si.
-
----
-
-## Split tunneling (implementação)
-
-Quando **ligado**, só o tráfego dos domínios do Discord (`discord.com`,
-`gateway.discord.gg`, `cdn.discordapp.com`, etc.) passa pela VPN — o resto
-da internet segue pela conexão normal. Quando **desligado**, é full tunnel.
-
-Como é baseado em resolver IPs de CDN (que rotacionam), a cobertura não é
-100% garantida pra toda mídia/voz em tempo real — mas cobre bem
-API/gateway, que é o essencial pro bypass funcionar.
+A lógica Python (VPNManager, flow, auto-update, single instance, admin elevation)
+foi mantida inteiramente — só a UI mudou.
 
 ---
 
 ## Estrutura do repositório
 
 ```
-hyavpn-themed-lain/
-├── app.py                    # app principal (fonte)
-├── requirements.txt          # deps de build/dev (não pro usuário final)
+hyavpn/
+├── app.py                    # app principal (pywebview)
+├── requirements.txt          # deps de build/dev
+├── ui/
+│   └── index.html            # interface HTML/CSS/JS completa
 ├── assets/                   # gifs/pngs do personagem (idle/connecting/connected)
 ├── audio/                    # sons (connecting/connected/success)
+├── icons/                    # icon.ico, icon.png
 ├── installer/
-│   └── setup.py              # bootstrapper -- única coisa que o usuário baixa
+│   └── setup.py              # bootstrapper — única coisa que o usuário baixa
 ├── .github/workflows/
 │   └── release.yml           # build automático do .exe a cada tag
-├── README.md                 # doc pro público final
+├── README.md
 └── DEV.md                    # este arquivo
 ```
 
@@ -108,49 +50,104 @@ hyavpn-themed-lain/
 ```
 pip install -r requirements.txt
 python app.py
+# ou com devtools do WebView2 abertos:
+python app.py --debug
 ```
 
-Pra gerar os exes manualmente (sem esperar o CI):
+**Nota:** No Windows, o pywebview usa WebView2 (já incluído no Windows 11).
+No Windows 10, instale o runtime: https://developer.microsoft.com/webview2
+
+---
+
+## Como funciona o drag (pywebview)
+
+A titlebar tem CSS `-webkit-app-region: drag` — isso diz ao WebView2 que
+aquela região é a área de arrasto da janela. Os botões (dots) têm
+`-webkit-app-region: no-drag` pra excluí-los do arrasto. Zero código Python
+necessário, zero hacks de WinAPI, zero bug de janela crescendo em telas
+com escala >100%.
+
+---
+
+## Como funciona a UI (fluxo Python → JS)
+
 ```
-pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" --uac-admin app.py
-pyinstaller --onefile --windowed --name hyavpn-setup --icon icons/icon.ico --add-data "icons;icons" --uac-admin installer/setup.py
+Python (app.py)          JS (ui/index.html)
+──────────────           ──────────────────
+JsApi._js(expr)   ──→    window.evaluate_js()
+                          └─ window.hyavpn.setState('connecting')
+                          └─ window.hyavpn.addLog('...', 'pink')
+                          └─ window.hyavpn.showUpdateBadge()
+
+JS click           ──→    pywebview.api.start_bypass()
+                   ──→    pywebview.api.set_split_tunnel(true)
+                   ──→    pywebview.api.close_window()
 ```
 
 ---
 
-## Ícone
+## Build (PyInstaller)
 
-Fica em `icons/icon.ico` (usado no `.exe`, na janela do app e no atalho do
-Desktop). Já vem um placeholder no estilo Accela/Lain — pra trocar pelo seu:
+```bash
+# App principal
+pyinstaller --onefile --windowed --name hyavpn \
+  --icon icons/icon.ico \
+  --add-data "icons;icons" \
+  --add-data "assets;assets" \
+  --add-data "audio;audio" \
+  --add-data "ui;ui" \
+  --uac-admin \
+  app.py
 
-1. Gere um `.ico` de verdade, multi-resolução: **16, 32, 48, 256px**
-   (dá pra fazer com o próprio Pillow: `Image.save("icon.ico", sizes=[(16,16),(32,32),(48,48),(256,256)])`
-   ou qualquer conversor online de PNG → ICO).
-2. Substitua `icons/icon.ico` (mantendo esse nome/caminho).
-3. Se quiser trocar também a versão usada em README/preview, atualize
-   `icons/icon.png`.
-4. Não precisa mexer em mais nada — o build (`release.yml`) já embute
-   `icons/icon.ico` no `.exe` automaticamente na próxima tag publicada.
+# Instalador
+pyinstaller --onefile --windowed --name hyavpn-setup \
+  --icon icons/icon.ico \
+  --add-data "icons;icons" \
+  --uac-admin \
+  installer/setup.py
+```
+
+O `--add-data "ui;ui"` é o novo item em relação à versão antiga —
+o HTML da interface precisa ir junto no bundle.
+
+O CI (`.github/workflows/release.yml`) faz esse build automaticamente
+a cada tag `vX.Y.Z`. Atualize `__version__` em `app.py`, crie a tag,
+e o GitHub Actions publica os assets.
+
+---
+
+## Publicando nova versão
+
+1. Atualize `__version__` em `app.py` (ex: `"1.1.0"`).
+2. Commit e push.
+3. Crie e envie a tag:
+   ```
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
 
 ---
 
 ## Personagem
 
-Coloque em `assets/` (fundo transparente, 220x220):
-| Arquivo | Expressão |
-|---|---|
-| `idle.gif` / `idle.png` | Neutra, em espera |
-| `connecting.gif` / `connecting.png` | Séria/focada |
-| `connected.gif` / `connected.png` | Satisfeita/feliz |
+Coloque em `assets/` (fundo transparente):
 
-GIF tem prioridade sobre PNG; se nenhum existir, cai num sketch placeholder
-gerado por código.
+| Arquivo | Expressão | Tamanho sugerido |
+|---|---|---|
+| `idle.gif` / `idle.png` | Neutra, em espera | 220×220 |
+| `connecting.gif` / `connecting.png` | Séria/focada | 220×220 |
+| `connected.gif` / `connected.png` | Satisfeita/feliz | 220×220 |
+
+GIF é exibido nativamente pelo browser (sem código Python de animação).
+Durante o estado "connecting", um filtro CSS de glitch é aplicado sobre
+o `<img>` — `hue-rotate`, `saturate`, `translate` em `@keyframes`.
 
 ---
 
 ## Áudio
 
 Em `audio/`:
+
 | Arquivo | Quando toca |
 |---|---|
 | `connecting.mp3` | Enquanto conecta |
@@ -161,13 +158,10 @@ Em `audio/`:
 
 ## Como funciona o bypass (fluxo técnico)
 
-1. Clica **AUTO BYPASS**
-2. App busca config do Riseup (`https://riseup.net/provider.json`)
-3. Conecta OpenVPN nos servidores do Riseup (full tunnel ou só Discord,
-   dependendo do split tunneling)
-4. Mata o Discord e reabre
-5. Aguarda o Discord iniciar
-6. Desconecta a VPN
-7. Mostra overlay "STREAM ENABLED"
-
-O Discord reconecta com o IP da VPN já liberado — a restrição é contornada.
+1. Clica **AUTO BYPASS** → JS chama `pywebview.api.start_bypass()`
+2. Python: busca config do Riseup, gera `.ovpn`
+3. Python: sobe OpenVPN, aguarda "Initialization Sequence Completed"
+4. Python: mata o Discord, espera `discord_delay_s` segundos, reabre
+5. Python: aguarda processo do Discord subir
+6. Python: desconecta VPN, chama `hyavpn.setState('success')` via JS
+7. JS: exibe overlay animado "STREAM ENABLED"

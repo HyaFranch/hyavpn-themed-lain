@@ -1,326 +1,260 @@
 """
 hyavpn installer — by hyafranch
 Baixa a última versão publicada no GitHub (exe + assets + audio), instala o
-OpenVPN, cria atalho no Desktop. Essa é a ÚNICA coisa que o usuário baixa
-manualmente — tudo o mais vem do GitHub Releases em tempo de instalação.
+OpenVPN, cria atalho no Desktop. Única coisa que o usuário baixa manualmente.
 
-Compilado como hyavpn-setup.exe (via PyInstaller, --uac-admin), então já
-pede elevação de administrador sozinho ao abrir — não precisa "executar
-como administrador" manualmente.
+Compilado como hyavpn-setup.exe (via PyInstaller, --uac-admin).
+UI: webview (HTML/CSS/JS) — mesmo motor que o app principal.
 """
 
-import os, sys, subprocess, shutil, urllib.request, urllib.error, ssl, json, zipfile, tempfile, winreg, time
-import tkinter as tk
-from tkinter import ttk
+import os
+import sys
+import json
+import shutil
+import socket
+import subprocess
+import ssl
+import tempfile
 import threading
+import time
+import urllib.request
+import urllib.error
+import zipfile
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GITHUB_REPO = "HyaFranch/hyavpn-themed-lain"
+GITHUB_REPO      = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-DIST_ASSET_NAME = "hyavpn-dist.zip"   # asset publicado em cada Release (exe + assets/ + audio/)
+DIST_ASSET_NAME  = "hyavpn-dist.zip"
 
 INSTALL_DIR = os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "hyavpn")
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", "."), "hyavpn")
 EXE_NAME    = "hyavpn.exe"
 
-# OpenVPN installer (versão community, silenciosa)
 OPENVPN_URL = "https://swupdate.openvpn.org/community/releases/OpenVPN-2.6.9-I001-amd64.msi"
 OPENVPN_MSI = os.path.join(tempfile.gettempdir(), "openvpn-setup.msi")
-
 DIST_ZIP_TMP = os.path.join(tempfile.gettempdir(), "hyavpn-dist.zip")
 
-PINK     = "#ff2d78"
-PINK_DIM = "#8a0038"
-BLACK    = "#000000"
-PANEL    = "#0a0005"
-GREEN    = "#00ff41"
-DIM      = "#3a1a28"
-RED      = "#ff0033"
+
+def resource_path(relative_path: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    # When running as script, icons/ is one level up (repo root)
+    candidate = os.path.join(base, relative_path)
+    if not os.path.exists(candidate):
+        parent = os.path.join(os.path.dirname(base), relative_path)
+        if os.path.exists(parent):
+            return parent
+    return candidate
 
 
-# ── Titlebar customizada (mesmo estilo/técnica do app principal — ver
-# _draw_titlebar_dots / _make_draggable / _setup_native_window em app.py) ──
-def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
-    close = canvas.create_oval(x, 11, x + 14, 25, fill=PINK, outline="")
-    canvas.tag_bind(close, "<Button-1>", lambda e: on_close())
-    canvas.tag_bind(close, "<Enter>", lambda e: canvas.itemconfig(close, fill=RED))
-    canvas.tag_bind(close, "<Leave>", lambda e: canvas.itemconfig(close, fill=PINK))
-    x += 22
-    if on_minimize:
-        mini = canvas.create_oval(x, 11, x + 14, 25, fill="", outline=PINK_DIM, width=2)
-        canvas.tag_bind(mini, "<Button-1>", lambda e: on_minimize())
-        canvas.tag_bind(mini, "<Enter>", lambda e: canvas.itemconfig(mini, outline=PINK))
-        canvas.tag_bind(mini, "<Leave>", lambda e: canvas.itemconfig(mini, outline=PINK_DIM))
-        x += 22
-    return x
+INSTALLER_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>hyavpn setup</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #000000; --panel: #0a0005; --border: #3d0028;
+    --pink: #ff2d78; --pink-dim: #5a0030; --green: #00ff41;
+    --dim: #3a1a28; --red: #ff0033; --white: #f0d0dc;
+    --font: 'Courier New', monospace;
+  }
+  html, body { width:100%; height:100%; overflow:hidden; background:var(--bg);
+    color:var(--white); font-family:var(--font); user-select:none; }
+
+  /* titlebar */
+  #titlebar {
+    height:36px; background:var(--panel); display:flex; align-items:center;
+    -webkit-app-region:drag; app-region:drag;
+  }
+  .tb-dots { display:flex; align-items:center; gap:8px; padding:0 14px;
+    -webkit-app-region:no-drag; app-region:no-drag; }
+  .dot-btn { width:14px; height:14px; border-radius:50%; border:none; cursor:pointer; outline:none; }
+  .dot-close { background:var(--pink); }
+  .dot-close:hover { background:var(--red); }
+  .dot-mini { background:transparent; border:2px solid var(--pink-dim); }
+  .dot-mini:hover { border-color:var(--pink); }
+  .tb-title { font-size:9px; color:var(--dim); letter-spacing:1px; margin-left:8px; }
+
+  /* content */
+  #content { display:flex; flex-direction:column; align-items:center; padding:20px 30px 24px; }
+  h1 { font-size:28px; font-weight:bold; color:var(--pink); letter-spacing:3px; margin-bottom:4px; }
+  .subtitle { font-size:9px; color:var(--dim); letter-spacing:1px; margin-bottom:16px; }
+  .divider { width:100%; height:1px; background:var(--pink); margin:4px 0 16px; }
+
+  #status { font-size:10px; color:var(--green); letter-spacing:1px; margin-bottom:8px; text-align:center; }
+
+  /* log */
+  #log { width:440px; height:160px; background:var(--panel); border:1px solid var(--border);
+    border-radius:2px; padding:8px 10px; overflow-y:auto; font-size:8px; line-height:1.7; }
+  #log::-webkit-scrollbar { width:3px; }
+  #log::-webkit-scrollbar-thumb { background:var(--border); }
+  .c-pink { color:var(--pink); } .c-green { color:var(--green); }
+  .c-red { color:var(--red); }   .c-dim { color:var(--dim); }
+  .log-line { display:block; }
+  .ts { color:var(--dim); }
+
+  /* progress */
+  #progress-wrap { width:440px; height:4px; background:var(--border);
+    border-radius:2px; margin:12px 0 4px; overflow:hidden; }
+  #progress-bar { height:100%; background:var(--pink); width:0%;
+    transition:width 0.4s ease; box-shadow:0 0 8px rgba(255,45,120,0.5); }
+
+  /* button */
+  #btn-install {
+    margin-top:14px;
+    width:200px; height:44px;
+    background:var(--panel);
+    border:1px solid var(--pink);
+    border-radius:2px;
+    color:var(--pink);
+    font-family:var(--font);
+    font-size:13px;
+    font-weight:bold;
+    letter-spacing:3px;
+    cursor:pointer;
+    transition:background 0.2s, box-shadow 0.2s;
+  }
+  #btn-install:hover:not(:disabled) { background:#150008; box-shadow:0 0 14px rgba(255,45,120,0.3); }
+  #btn-install:disabled { border-color:var(--dim); color:var(--dim); cursor:default; }
+</style>
+</head>
+<body>
+<div id="titlebar">
+  <div class="tb-dots">
+    <button class="dot-btn dot-close" onclick="webview.api.close_window()" title="close"></button>
+    <button class="dot-btn dot-mini"  onclick="webview.api.minimize_window()" title="minimize"></button>
+  </div>
+  <span class="tb-title">hyavpn setup</span>
+</div>
+
+<div id="content">
+  <h1>hyavpn</h1>
+  <div class="subtitle">by hyafranch  //  installer</div>
+  <div class="divider"></div>
+
+  <div id="status">ready to install.</div>
+
+  <div id="log"></div>
+
+  <div id="progress-wrap"><div id="progress-bar"></div></div>
+
+  <button id="btn-install" onclick="webview.api.start_install()">[ INSTALL ]</button>
+</div>
+
+<script>
+function addLog(msg, color) {
+  const el = document.getElementById('log');
+  const now = new Date();
+  const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+  const line = document.createElement('span');
+  line.className = `log-line c-${color||'dim'}`;
+  line.innerHTML = `<span class="ts">[${ts}]</span> ${msg.replace(/</g,'&lt;')}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(msg, color) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = color || 'var(--green)';
+}
+function setProgress(pct) {
+  document.getElementById('progress-bar').style.width = pct + '%';
+}
+function setBtn(text, disabled) {
+  const b = document.getElementById('btn-install');
+  if (text) b.textContent = text;
+  b.disabled = disabled;
+  if (!disabled) b.onclick = disabled ? null : () => webview.api.start_install();
+}
+function onDone(closeText) {
+  document.getElementById('btn-install').textContent = closeText || '[ CLOSE ]';
+  document.getElementById('btn-install').disabled = false;
+  document.getElementById('btn-install').onclick = () => webview.api.close_window();
+}
+
+window.installer = { addLog, setStatus, setProgress, setBtn, onDone };
+</script>
+</body>
+</html>
+"""
 
 
-def _make_draggable(win, widgets):
-    """Arrasto manual, só reposiciona (+x+y) -- NUNCA toca em largura/altura.
+class InstallerApi:
+    """JS API for the installer webview."""
 
-    Antes isso usava o truque nativo (ReleaseCapture + WM_NCLBUTTONDOWN/
-    HTCAPTION) pra deixar o Windows mover a janela direto. Só que essa
-    técnica, combinada com a titlebar nativa removida via SetWindowLongW
-    (ver _setup_native_window) num processo que não se declara "DPI aware",
-    faz o Windows reescalar a janela em tempo real durante o arrasto em
-    telas com escala >100% (125%/150%, comum em notebook) -- resultado:
-    a janela "engorda" a cada frame enquanto você arrasta.
-
-    Aqui o Python nunca chama nada com largura/altura durante o drag --
-    só "+x+y" -- então não tem como a janela crescer, não importa o que o
-    Windows esteja fazendo de escala por baixo. Os eventos de <B1-Motion>
-    são "coalescidos" (só a última posição pendente é aplicada) pra não
-    enfileirar updates e travar o arrasto."""
-    drag = {"x": 0, "y": 0}
-    pending = {"x": None, "y": None, "scheduled": False}
-
-    def _apply_move():
-        pending["scheduled"] = False
-        if pending["x"] is not None:
-            win.geometry(f"+{pending['x']}+{pending['y']}")
-
-    def _start(event):
-        drag["x"], drag["y"] = event.x, event.y
-
-    def _do_move(event):
-        pending["x"] = event.x_root - drag["x"]
-        pending["y"] = event.y_root - drag["y"]
-        if not pending["scheduled"]:
-            pending["scheduled"] = True
-            win.after(1, _apply_move)
-
-    for w in widgets:
-        w.bind("<ButtonPress-1>", _start)
-        w.bind("<B1-Motion>", _do_move)
-
-
-def _set_dpi_aware():
-    """Declara o processo como DPI-aware (Per-Monitor V2, com fallback pra
-    versões mais antigas do Windows). Isso PRECISA rodar antes de qualquer
-    janela Tk ser criada -- é a causa raiz do bug de janela crescendo ao
-    arrastar em telas com escala: sem isso o Windows "virtualiza" o DPI do
-    processo e reescala a janela por conta própria em vários momentos,
-    inclusive durante o SetWindowPos(SWP_FRAMECHANGED) que tira a titlebar
-    nativa em _setup_native_window."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-        except Exception:
-            ctypes.windll.user32.SetProcessDPIAware()  # fallback Windows 7/8
-    except Exception:
-        pass
-
-
-def resource_path(relative_path):
-    """Resolve um recurso (ícone) tanto rodando como script quanto compilado
-    com PyInstaller --onefile (extraído em sys._MEIPASS em runtime).
-
-    Quando compilado, tudo fica embutido na raiz do pacote (_MEIPASS), então
-    o caminho relativo funciona direto. Quando rodando como script, porém,
-    este arquivo mora em installer/, mas a pasta icons/ está um nível acima,
-    na raiz do repo — por isso tentamos ambos os locais nesse caso."""
-    if getattr(sys, "_MEIPASS", None):
-        return os.path.join(sys._MEIPASS, relative_path)
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.join(here, relative_path)
-    if os.path.exists(candidate):
-        return candidate
-
-    parent_candidate = os.path.join(os.path.dirname(here), relative_path)
-    return parent_candidate
-
-
-ICON_ICO = resource_path(os.path.join("icons", "icon.ico"))
-
-
-class Installer(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("hyavpn setup")
-        self.geometry("500x436")
-        self.configure(bg=BLACK)
-        self.resizable(False, False)
+    def __init__(self, wh):
+        self._wh           = wh
         self._release_info = None
+        self._skip_openvpn = False
 
-        # Mesma técnica do app principal: tira só os bits de estilo da
-        # titlebar nativa via WinAPI (em vez de overrideredirect), pra não
-        # ter o flash branco e pra bater visualmente com o app instalado.
-        if sys.platform == "win32":
-            self.withdraw()
-            self.after(10, self._setup_native_window)
-        else:
-            self.overrideredirect(True)
+    @property
+    def _win(self):
+        return self._wh["win"]
 
-        try:
-            if os.path.exists(ICON_ICO):
-                self.iconbitmap(ICON_ICO)
-        except Exception:
-            pass
-        self._build()
+    def _js(self, expr):
+        if self._win:
+            self._win.evaluate_js(expr)
 
-    def _setup_native_window(self):
-        import ctypes
-        GWL_STYLE, GWL_EXSTYLE = -16, -20
-        WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
-        WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
-        WS_EX_COMPOSITED = 0x02000000  # double buffering nativo -- ver nota em app.py::_strip_native_decorations
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0004, 0x0020
-        try:
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-            style = (style & ~(WS_CAPTION | WS_THICKFRAME)) | WS_MINIMIZEBOX | WS_SYSMENU
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
-            exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW | WS_EX_COMPOSITED
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
-        except Exception:
-            self.overrideredirect(True)
-        self.deiconify()
+    def _log(self, msg, color="dim"):
+        safe = msg.replace("\\", "\\\\").replace("'", "\\'")
+        self._js(f"installer.addLog('{safe}', '{color}')")
 
-    def _minimize(self):
-        self.iconify()
+    def _status(self, msg, color="#00ff41"):
+        safe = msg.replace("'", "\\'")
+        self._js(f"installer.setStatus('{safe}', '{color}')")
 
-    def _build(self):
-        titlebar = tk.Frame(self, bg=PANEL, height=36)
-        titlebar.pack(fill="x", side="top")
-        titlebar.pack_propagate(False)
+    def _progress(self, pct):
+        self._js(f"installer.setProgress({pct})")
 
-        dots = tk.Canvas(titlebar, width=52, height=36, bg=PANEL, highlightthickness=0)
-        dots.pack(side="left", padx=(12, 0))
-        _draw_titlebar_dots(dots, 0, on_close=self.destroy, on_minimize=self._minimize)
+    def close_window(self):
+        if self._win:
+            self._win.destroy()
 
-        tb_label = tk.Label(titlebar, text="hyavpn setup", font=("Courier New", 9),
-                             fg=DIM, bg=PANEL)
-        tb_label.pack(side="left", padx=8)
+    def minimize_window(self):
+        if self._win:
+            self._win.minimize()
 
-        _make_draggable(self, [titlebar, tb_label])
-
-        tk.Label(self, text="hyavpn", font=("Courier New", 28, "bold"),
-                 fg=PINK, bg=BLACK).pack(pady=(20, 2))
-        tk.Label(self, text="by hyafranch  //  installer",
-                 font=("Courier New", 9), fg=DIM, bg=BLACK).pack()
-
-        tk.Frame(self, bg=PINK, height=1).pack(fill="x", padx=30, pady=16)
-
-        self.status = tk.Label(self, text="ready to install.",
-                               font=("Courier New", 10), fg=GREEN, bg=BLACK)
-        self.status.pack(pady=4)
-
-        self.log_box = tk.Text(self, bg="#0a0005", fg=GREEN, font=("Courier New", 8),
-                                bd=0, highlightthickness=0, state="disabled",
-                                height=10, width=58)
-        self.log_box.pack(padx=24, pady=8)
-        self.log_box.tag_config("pink",  foreground=PINK)
-        self.log_box.tag_config("green", foreground=GREEN)
-        self.log_box.tag_config("red",   foreground="#ff0033")
-        self.log_box.tag_config("dim",   foreground=DIM)
-
-        self.progress = ttk.Progressbar(self, length=440, mode="determinate")
-        self.progress.pack(padx=30, pady=4)
-
-        self.btn = tk.Button(self, text="[ INSTALL ]",
-                             font=("Courier New", 12, "bold"),
-                             fg=PINK, bg="#150008", activeforeground=BLACK,
-                             activebackground=PINK, bd=0, pady=8, padx=20,
-                             cursor="hand2", command=self._start)
-        self.btn.pack(pady=12)
-
-    def _log(self, msg, tag="dim"):
-        """Thread-safe -- _install roda numa thread de background (ver
-        _start) e chama isso direto. Igual ao mesmo bug do app principal:
-        mexer em widget Tk fora da main thread derruba com 'RuntimeError:
-        main thread is not in main loop'. Se não é a main thread, reagenda
-        via self.after(0, ...) em vez de tocar no widget."""
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: self._log(msg, tag))
-            return
-        self.log_box.configure(state="normal")
-        import time
-        self.log_box.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n", tag)
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
-
-    def _set_status(self, msg, color=GREEN):
-        """Thread-safe (mesmo motivo do _log acima)."""
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: self._set_status(msg, color))
-            return
-        self.status.configure(text=msg, fg=color)
-
-    def _set_progress(self, pct):
-        """Thread-safe -- substitui o antigo 'self.progress[\"value\"] = pct'
-        direto dentro de _install (rodando em background thread)."""
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: self._set_progress(pct))
-            return
-        self.progress["value"] = pct
-
-    def _set_btn(self, **kwargs):
-        """Thread-safe reconfigure do botão de instalar (chamado no fim de
-        _install, que roda em background thread)."""
-        if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda: self._set_btn(**kwargs))
-            return
-        self.btn.configure(**kwargs)
-
-    def _start(self):
-        self.btn.configure(state="disabled")
+    def start_install(self):
+        self._js("installer.setBtn('[ INSTALLING... ]', true)")
         threading.Thread(target=self._install, daemon=True).start()
 
+    # ── Install steps ─────────────────────────────────────────────────────────
     def _install(self):
         steps = [
-            ("creating directories",        self._step_dirs,             8),
-            ("checking latest release",     self._step_fetch_release,   20),
-            ("downloading hyavpn",          self._step_download_dist,   45),
-            ("installing files",            self._step_extract_dist,    58),
-            ("checking openvpn",            self._step_openvpn,         72),
-            ("installing openvpn",          self._step_openvpn_install, 88),
-            ("creating shortcut",           self._step_shortcut,        98),
-            ("done",                        None,                      100),
+            ("creating directories",    self._step_dirs,              8),
+            ("checking latest release", self._step_fetch_release,    20),
+            ("downloading hyavpn",      self._step_download_dist,    45),
+            ("installing files",        self._step_extract_dist,     58),
+            ("checking openvpn",        self._step_openvpn,          72),
+            ("installing openvpn",      self._step_openvpn_install,  88),
+            ("creating shortcut",       self._step_shortcut,         98),
+            ("done",                    None,                       100),
         ]
         for label, fn, pct in steps:
-            self._set_status(f"// {label}...")
+            self._status(f"// {label}...")
             self._log(label, "pink")
-            self._set_progress(pct)
+            self._progress(pct)
             if fn:
                 try:
                     fn()
                 except Exception as e:
                     self._log(f"error: {e}", "red")
-                    self._set_status("installation failed.", PINK)
-                    self._set_btn(state="normal", text="[ RETRY ]")
+                    self._status("installation failed.", "#ff2d78")
+                    self._js("installer.onDone('[ RETRY ]')")
                     return
 
         self._log("installation complete.", "green")
-        self._set_status("// INSTALLED SUCCESSFULLY", GREEN)
-        self._set_btn(state="normal", text="[ CLOSE ]", command=self.destroy)
+        self._status("// INSTALLED SUCCESSFULLY", "#00ff41")
+        self._js("installer.onDone('[ CLOSE ]')")
 
-    # ── Passos ─────────────────────────────────────────────────────────────────
     def _step_dirs(self):
         os.makedirs(INSTALL_DIR, exist_ok=True)
         os.makedirs(APPDATA_DIR, exist_ok=True)
         self._log(f"install dir: {INSTALL_DIR}", "dim")
 
     def _github_get(self, url, timeout, retries=3):
-        """GET com retry (backoff) e mensagens de erro específicas -- em vez
-        de deixar o urllib.error.HTTPError genérico virar 'error: HTTP
-        Error 403: rate limit exceeded' sem explicação nenhuma no log.
-
-        A causa mais comum de "não baixa nada" é a API do GitHub sem
-        autenticação: limite de 60 requisições/hora POR IP. Se você estiver
-        atrás de CGNAT (comum em operadora de celular/banda larga no
-        Brasil), esse IP é compartilhado com um monte de outros clientes e
-        o limite estoura fácil -- não é algo que dá pra "consertar" no
-        instalador, só esperar a janela de 1h resetar (ou usar outra
-        rede)."""
-        ctx = ssl.create_default_context()
+        ctx      = ssl.create_default_context()
         last_err = None
         for attempt in range(1, retries + 1):
             req = urllib.request.Request(url, headers={"User-Agent": "hyavpn-installer"})
@@ -328,45 +262,33 @@ class Installer(tk.Tk):
                 return urllib.request.urlopen(req, context=ctx, timeout=timeout)
             except urllib.error.HTTPError as e:
                 last_err = e
-                if e.code == 403 or e.code == 429:
+                if e.code in (403, 429):
                     raise RuntimeError(
-                        "GitHub API rate limit excedido pro seu IP (limite anônimo: "
-                        "60 requisições/hora). Espere uns minutos e tente de novo, "
-                        "ou troque de rede (isso é comum em conexões com IP "
-                        "compartilhado / CGNAT)."
+                        "GitHub API rate limit excedido pro seu IP. "
+                        "Espere alguns minutos e tente de novo."
                     ) from e
                 if e.code == 404:
                     raise RuntimeError(
-                        f"nenhum Release publicado em github.com/{GITHUB_REPO}/releases "
-                        f"(ou repositório/URL errado). Publique uma release com a tag "
-                        f"vX.Y.Z pra API encontrar o asset."
+                        f"nenhum Release em github.com/{GITHUB_REPO}/releases"
                     ) from e
-                # outros HTTP errors (5xx etc) valem retry
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 last_err = e
             if attempt < retries:
-                self._log(f"falhou (tentativa {attempt}/{retries}), tentando de novo...", "dim")
+                self._log(f"tentativa {attempt}/{retries} falhou, retrying...", "dim")
                 time.sleep(1.5 * attempt)
-        raise RuntimeError(f"falha de rede ao acessar {url}: {last_err}") from last_err
+        raise RuntimeError(f"falha de rede: {last_err}") from last_err
 
     def _step_fetch_release(self):
-        """Consulta o último Release publicado no GitHub e localiza o asset de distribuição."""
         with self._github_get(GITHUB_API_LATEST, timeout=15) as r:
             data = json.loads(r.read())
-
-        tag = data.get("tag_name", "unknown")
+        tag       = data.get("tag_name", "unknown")
         asset_url = None
         for a in data.get("assets", []):
             if a.get("name") == DIST_ASSET_NAME:
                 asset_url = a.get("browser_download_url")
                 break
-
         if not asset_url:
-            raise RuntimeError(
-                f"release {tag} found, but no '{DIST_ASSET_NAME}' asset attached. "
-                f"check github.com/{GITHUB_REPO}/releases"
-            )
-
+            raise RuntimeError(f"release {tag} found but no '{DIST_ASSET_NAME}' asset.")
         self._release_info = {"tag": tag, "asset_url": asset_url}
         self._log(f"latest version: {tag}", "green")
 
@@ -378,56 +300,48 @@ class Installer(tk.Tk):
         self._log("download complete.", "green")
 
     def _step_extract_dist(self):
-        # Limpa uma instalação anterior (menos configs/certs, que ficam em APPDATA)
         if os.path.exists(INSTALL_DIR):
             for item in os.listdir(INSTALL_DIR):
                 p = os.path.join(INSTALL_DIR, item)
                 try:
-                    if os.path.isdir(p):
-                        shutil.rmtree(p)
-                    else:
-                        os.remove(p)
+                    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
                 except Exception:
                     pass
-
         with zipfile.ZipFile(DIST_ZIP_TMP) as z:
             z.extractall(INSTALL_DIR)
-
         exe_path = os.path.join(INSTALL_DIR, EXE_NAME)
         if not os.path.exists(exe_path):
-            raise RuntimeError(f"{EXE_NAME} not found after extracting — check the release package.")
-
+            raise RuntimeError(f"{EXE_NAME} not found after extracting.")
         self._log(f"installed to {INSTALL_DIR}", "green")
 
     def _step_openvpn(self):
         if os.path.exists(r"C:\Program Files\OpenVPN\bin\openvpn.exe"):
-            self._log("openvpn already installed, skipping download.", "dim")
-            self._skip_openvpn_install = True
+            self._log("openvpn already installed, skipping.", "dim")
+            self._skip_openvpn = True
             return
-        self._skip_openvpn_install = False
+        self._skip_openvpn = False
         self._log("downloading openvpn...", "dim")
         ctx = ssl.create_default_context()
         urllib.request.urlretrieve(OPENVPN_URL, OPENVPN_MSI)
         self._log("download complete.", "green")
 
     def _step_openvpn_install(self):
-        if getattr(self, "_skip_openvpn_install", False):
+        if self._skip_openvpn:
             self._log("openvpn already installed.", "dim")
             return
         self._log("installing openvpn silently (requires admin)...", "pink")
         subprocess.run(
             ["msiexec", "/i", OPENVPN_MSI, "/quiet", "/norestart", "ADDLOCAL=OpenVPN"],
-            check=True
+            check=True,
         )
         self._log("openvpn installed.", "green")
 
     def _get_desktop_path(self):
-        """Resolve o caminho REAL da pasta Desktop (compatível com Desktop
-        redirecionado pelo OneDrive — Known Folder Move)."""
         try:
+            import winreg
             key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
             )
             raw, _ = winreg.QueryValueEx(key, "Desktop")
             winreg.CloseKey(key)
@@ -440,30 +354,60 @@ class Installer(tk.Tk):
 
     def _step_shortcut(self):
         exe_path = os.path.join(INSTALL_DIR, EXE_NAME)
-
-        desktop = self._get_desktop_path()
+        desktop  = self._get_desktop_path()
         os.makedirs(desktop, exist_ok=True)
         lnk_path = os.path.join(desktop, "hyavpn.lnk")
-
-        ps_cmd = f"""
-$WS = New-Object -ComObject WScript.Shell
-$SC = $WS.CreateShortcut("{lnk_path}")
-$SC.TargetPath = "{exe_path}"
-$SC.WorkingDirectory = "{INSTALL_DIR}"
-$SC.IconLocation = "{exe_path}"
-$SC.Description = "hyavpn by hyafranch"
-$SC.Save()
-"""
+        ps_cmd = (
+            f'$WS = New-Object -ComObject WScript.Shell; '
+            f'$SC = $WS.CreateShortcut("{lnk_path}"); '
+            f'$SC.TargetPath = "{exe_path}"; '
+            f'$SC.WorkingDirectory = "{INSTALL_DIR}"; '
+            f'$SC.IconLocation = "{exe_path}"; '
+            f'$SC.Description = "hyavpn by hyafranch"; $SC.Save()'
+        )
         r = subprocess.run(["powershell", "-Command", ps_cmd],
                            check=False, capture_output=True, text=True)
         if r.returncode == 0 and os.path.exists(lnk_path):
-            self._log(f"shortcut created: {lnk_path}", "green")
+            self._log(f"shortcut: {lnk_path}", "green")
         else:
-            err = (r.stderr or r.stdout).strip()
-            self._log(f"shortcut creation failed: {err[-200:] if err else 'unknown error'}", "red")
+            err = (r.stderr or r.stdout or "").strip()
+            self._log(f"shortcut failed: {err[-150:]}", "red")
+
+
+def _set_dpi_aware():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def main():
+    import webview
+    _set_dpi_aware()
+
+    wh  = {"win": None}
+    api = InstallerApi(wh)
+
+    win = webview.create_window(
+        "hyavpn setup",
+        html             = INSTALLER_HTML,
+        js_api           = api,
+        width            = 500,
+        height           = 436,
+        resizable        = False,
+        frameless        = True,
+        background_color = "#000000",
+    )
+    wh["win"] = win
+
+    webview.start(debug=("--debug" in sys.argv))
 
 
 if __name__ == "__main__":
-    _set_dpi_aware()
-    app = Installer()
-    app.mainloop()
+    main()
