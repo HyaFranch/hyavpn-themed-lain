@@ -57,12 +57,25 @@ ctk.set_appearance_mode("dark")
 # interna que pinta a titlebar nativa de escuro (_windows_set_titlebar_color)
 # pode falhar com "TypeError: 'str' object is not callable" em certas
 # combinações de versão do Windows/customtkinter, ao tentar restaurar o foco
-# depois de repintar a janela. Desligamos só essa manipulação da titlebar
-# nativa (puramente cosmético) -- o app já desenha sua própria barra de
-# título customizada logo abaixo, então isso não muda a aparência de verdade.
-ctk.CTk._deactivate_windows_window_header_manipulation = True
+# depois de repintar a janela -- a pintura em si (a parte que interessa)
+# já aconteceu antes desse erro, só o "restaurar foco" no final é que quebra.
+# Em vez de desligar a titlebar escura (o que deixaria a barra branca padrão
+# do Windows), envolvemos o método original num try/except: a cor escura
+# continua sendo aplicada normalmente, e só ignoramos o erro que sobra.
+def _wrap_titlebar_color_safe(cls):
+    original = cls._windows_set_titlebar_color
+
+    def _safe(self, color_mode):
+        try:
+            original(self, color_mode)
+        except Exception:
+            pass
+
+    cls._windows_set_titlebar_color = _safe
+
+_wrap_titlebar_color_safe(ctk.CTk)
 try:
-    ctk.CTkToplevel._deactivate_windows_window_header_manipulation = True
+    _wrap_titlebar_color_safe(ctk.CTkToplevel)
 except AttributeError:
     pass
 
@@ -167,6 +180,50 @@ KANA = "アイウエオカキクケコサシスセソタチ01ﾊﾋﾌﾍﾎｦ�
 
 def glitch(text, rate=0.18):
     return "".join(random.choice(KANA) if c != " " and random.random() < rate else c for c in text)
+
+
+# ── Titlebar customizada (estilo Linux/GNOME, tema Accela/Lain) ─────────────
+# A titlebar nativa do Windows só vem branca, não dá pra pintar no tema do
+# app -- por isso as janelas rodam com overrideredirect(True) (sem decoração
+# nativa) e desenham a própria barra, com "dots" no estilo dos temas clássicos
+# do Linux (Ubuntu Ambiance etc) no lugar dos botões de fechar/minimizar.
+def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
+    """Desenha os dots (fechar + minimizar opcional) num Canvas já
+    posicionado na titlebar, com hover, ligados aos callbacks passados.
+    Retorna o x seguinte, caso queira desenhar mais alguma coisa depois."""
+    close = canvas.create_oval(x, 16, x + 14, 30, fill=C["pink"], outline="")
+    canvas.tag_bind(close, "<Button-1>", lambda e: on_close())
+    canvas.tag_bind(close, "<Enter>", lambda e: canvas.itemconfig(close, fill=C["red"]))
+    canvas.tag_bind(close, "<Leave>", lambda e: canvas.itemconfig(close, fill=C["pink"]))
+    x += 22
+
+    if on_minimize:
+        mini = canvas.create_oval(x, 16, x + 14, 30, fill="", outline=C["pink_dim"], width=2)
+        canvas.tag_bind(mini, "<Button-1>", lambda e: on_minimize())
+        canvas.tag_bind(mini, "<Enter>", lambda e: canvas.itemconfig(mini, outline=C["pink"]))
+        canvas.tag_bind(mini, "<Leave>", lambda e: canvas.itemconfig(mini, outline=C["pink_dim"]))
+        x += 22
+
+    return x
+
+
+def _make_draggable(win, widgets):
+    """Liga os widgets passados (normalmente a barra e o título) pra
+    arrastar a janela pelo mouse -- perdido junto com a decoração nativa
+    quando a janela roda com overrideredirect(True)."""
+    drag = {"x": 0, "y": 0}
+
+    def _start(event):
+        drag["x"], drag["y"] = event.x, event.y
+
+    def _do_move(event):
+        x = win.winfo_pointerx() - drag["x"]
+        y = win.winfo_pointery() - drag["y"]
+        win.geometry(f"+{x}+{y}")
+
+    for w in widgets:
+        w.bind("<ButtonPress-1>", _start)
+        w.bind("<B1-Motion>", _do_move)
 
 
 # ── Split tunneling ──────────────────────────────────────────────────────────
@@ -506,13 +563,23 @@ class HyaVPN(ctk.CTk):
         self.resizable(False, False)
         self.configure(fg_color=C["bg"])
 
+        # Tira a decoração nativa do Windows (a titlebar branca) pra usar a
+        # barra customizada desenhada em _build_ui. No Windows, isso por
+        # padrão tira o app da barra de tarefas -- _ensure_taskbar_icon
+        # corrige isso via WinAPI. <Map> é o evento que dispara quando a
+        # janela volta do estado minimizado (ver _minimize).
+        self.overrideredirect(True)
+        self.bind("<Map>", self._on_map_restore)
+        if sys.platform == "win32":
+            self.after(10, self._ensure_taskbar_icon)
+
         try:
             if os.path.exists(ICON_ICO):
                 self.iconbitmap(ICON_ICO)
         except Exception:
             pass  # .ico ausente ou inválido não deve impedir o app de abrir
 
-        self.state   = "idle"
+        self._state = "idle"
         self._t      = 0.0
         self._scan_y = 0
         self._glitch = False
@@ -532,27 +599,63 @@ class HyaVPN(ctk.CTk):
         # checa update em background, sem travar a UI, um pouco depois de abrir
         self.after(1500, lambda: threading.Thread(target=self._check_update_bg, daemon=True).start())
 
+    # ── Titlebar customizada: minimizar/restaurar/taskbar (Windows) ─────────────
+    def _minimize(self):
+        # Trick padrão pra minimizar uma janela sem decoração nativa no
+        # Windows: reativa a decoração só durante o iconify, e tira de novo
+        # quando a janela voltar (ver _on_map_restore, ligado ao evento <Map>).
+        self.overrideredirect(False)
+        self.iconify()
+
+    def _on_map_restore(self, event=None):
+        if self.state() == "normal":
+            self.overrideredirect(True)
+
+    def _ensure_taskbar_icon(self):
+        """No Windows, overrideredirect(True) tira a janela da barra de
+        tarefas por padrão. Isso força de volta via WinAPI, marcando a
+        janela como WS_EX_APPWINDOW."""
+        try:
+            import ctypes
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            self.withdraw()
+            self.after(10, self.deiconify)
+        except Exception:
+            pass
+
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         # Background canvas
         self.bg = tk.Canvas(self, bg=C["bg"], highlightthickness=0, width=440, height=640)
         self.bg.place(x=0, y=0)
 
-        # Header bar
+        # Header bar / titlebar customizada
         self.hdr = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=46)
         self.hdr.place(x=0, y=0, relwidth=1)
+
+        # Dots estilo Linux (Ubuntu/GNOME) no lugar dos botões nativos --
+        # fechar (rosa cheio) e minimizar (rosa contorno).
+        dots = tk.Canvas(self.hdr, width=52, height=46, bg=C["panel"], highlightthickness=0)
+        dots.place(x=12, y=0)
+        _draw_titlebar_dots(dots, 0, on_close=self.destroy, on_minimize=self._minimize)
 
         self.title_lbl = ctk.CTkLabel(
             self.hdr, text="hyavpn",
             font=FT, text_color=C["pink"]
         )
-        self.title_lbl.place(x=14, y=8)
+        self.title_lbl.place(x=78, y=8)
 
         self.version_lbl = ctk.CTkLabel(
             self.hdr, text=f"v{__version__} // by hyafranch",
             font=FX, text_color=C["dim"]
         )
-        self.version_lbl.place(x=16, y=30)
+        self.version_lbl.place(x=80, y=30)
 
         gear = ctk.CTkButton(
             self.hdr, text="⚙", width=36, height=36,
@@ -561,6 +664,9 @@ class HyaVPN(ctk.CTk):
             corner_radius=2, command=self._open_settings
         )
         gear.place(x=394, y=5)
+
+        # Arrastar a janela pela barra (perdido junto com a titlebar nativa)
+        _make_draggable(self, [self.hdr, self.title_lbl, self.version_lbl])
 
         # Personagem
         self.char_canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0,
@@ -700,7 +806,7 @@ class HyaVPN(ctk.CTk):
 
     # ── Bypass flow ────────────────────────────────────────────────────────────
     def _on_bypass(self):
-        if self.state != "idle":
+        if self._state != "idle":
             return
         threading.Thread(target=self._flow, daemon=True).start()
 
@@ -796,11 +902,11 @@ class HyaVPN(ctk.CTk):
 
     # ── State ──────────────────────────────────────────────────────────────────
     def _set_state(self, state):
-        self.state = state
+        self._state = state
         self.after(0, self._apply_state)
 
     def _apply_state(self):
-        s = self.state
+        s = self._state
         dot_colors = {"idle": C["grey"], "connecting": C["pink"], "connected": C["green"], "success": C["green"]}
         self.dot.itemconfig("d", fill=dot_colors.get(s, C["grey"]))
 
@@ -1003,6 +1109,11 @@ del "%~f0"
         w.geometry("340x500")
         w.configure(fg_color=C["bg"])
         w.resizable(False, False)
+
+        # Mesma titlebar customizada da janela principal, só que com dot de
+        # fechar apenas (é uma janela modal, não faz sentido minimizar).
+        w.overrideredirect(True)
+
         try:
             if os.path.exists(ICON_ICO):
                 w.after(150, lambda: w.iconbitmap(ICON_ICO))  # CTkToplevel precisa de um delay no windows
@@ -1010,18 +1121,33 @@ del "%~f0"
             pass
         w.grab_set()
 
-        ctk.CTkLabel(w, text="// SETTINGS", font=FT, text_color=C["pink"]).pack(pady=(20, 4))
-        ctk.CTkFrame(w, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
+        w_hdr = ctk.CTkFrame(w, fg_color=C["panel"], corner_radius=0, height=36)
+        w_hdr.place(x=0, y=0, relwidth=1)
 
-        ctk.CTkLabel(w, text="discord restart delay (s)", font=FX, text_color=C["dim"]).pack(anchor="w", padx=24)
-        sl = ctk.CTkSlider(w, from_=2, to=30, number_of_steps=28,
+        w_dots = tk.Canvas(w_hdr, width=30, height=36, bg=C["panel"], highlightthickness=0)
+        w_dots.place(x=12, y=0)
+        _draw_titlebar_dots(w_dots, 0, on_close=w.destroy)
+
+        w_title = ctk.CTkLabel(w_hdr, text="settings", font=FS, text_color=C["pink_dim"])
+        w_title.place(x=54, y=9)
+
+        _make_draggable(w, [w_hdr, w_title])
+
+        content = ctk.CTkFrame(w, fg_color="transparent", width=340, height=464)
+        content.place(x=0, y=36)
+
+        ctk.CTkLabel(content, text="// SETTINGS", font=FT, text_color=C["pink"]).pack(pady=(20, 4))
+        ctk.CTkFrame(content, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
+
+        ctk.CTkLabel(content, text="discord restart delay (s)", font=FX, text_color=C["dim"]).pack(anchor="w", padx=24)
+        sl = ctk.CTkSlider(content, from_=2, to=30, number_of_steps=28,
                            button_color=C["pink"], progress_color=C["pink_dim"])
         sl.set(10)
         sl.pack(fill="x", padx=24, pady=(0, 16))
 
-        ctk.CTkFrame(w, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
+        ctk.CTkFrame(content, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
 
-        st_row = ctk.CTkFrame(w, fg_color="transparent")
+        st_row = ctk.CTkFrame(content, fg_color="transparent")
         st_row.pack(fill="x", padx=24, pady=(0, 4))
         ctk.CTkLabel(st_row, text="split tunneling", font=FS, text_color=C["white"]).pack(side="left")
 
@@ -1039,32 +1165,32 @@ del "%~f0"
                                    command=_on_split_toggle)
         st_switch.pack(side="right")
 
-        ctk.CTkLabel(w, text="only discord's traffic uses the tunnel;\neverything else stays on your normal connection.",
+        ctk.CTkLabel(content, text="only discord's traffic uses the tunnel;\neverything else stays on your normal connection.",
                      font=FX, text_color=C["dim"], justify="left").pack(anchor="w", padx=24, pady=(0, 12))
 
-        ctk.CTkFrame(w, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
+        ctk.CTkFrame(content, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
 
-        ctk.CTkButton(w, text="[ REFRESH VPN CONFIG ]", width=200, height=36,
+        ctk.CTkButton(content, text="[ REFRESH VPN CONFIG ]", width=200, height=36,
                       fg_color=C["panel"], border_width=1, border_color=C["pink_dim"],
                       text_color=C["pink_dim"], font=FB, corner_radius=2,
                       command=lambda: threading.Thread(target=self.vpn.setup, daemon=True).start()
                       ).pack(pady=8)
 
-        ctk.CTkButton(w, text="[ CHECK FOR UPDATES ]", width=200, height=36,
+        ctk.CTkButton(content, text="[ CHECK FOR UPDATES ]", width=200, height=36,
                       fg_color=C["panel"], border_width=1, border_color=C["green2"],
                       text_color=C["green2"], font=FB, corner_radius=2,
                       command=self._manual_check_update
                       ).pack(pady=(0, 8))
 
-        ctk.CTkFrame(w, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
+        ctk.CTkFrame(content, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
 
-        ctk.CTkLabel(w, text="// CREDITS", font=("Courier New", 12, "bold"),
+        ctk.CTkLabel(content, text="// CREDITS", font=("Courier New", 12, "bold"),
                      text_color=C["pink"]).pack(pady=(4, 4))
-        ctk.CTkLabel(w,
+        ctk.CTkLabel(content,
                      text="hyavpn\nby hyafranch\n\nservers by riseup.net\ninspired by serial experiments lain\n\n\"no matter where you go,\neveryone is connected.\"",
                      font=FX, text_color=C["white"], justify="center").pack()
 
-        ctk.CTkButton(w, text="[ CLOSE ]", width=100, height=32,
+        ctk.CTkButton(content, text="[ CLOSE ]", width=100, height=32,
                       fg_color=C["panel"], border_width=1, border_color=C["grey"],
                       text_color=C["grey"], font=FB, corner_radius=2,
                       command=w.destroy).pack(pady=16)
