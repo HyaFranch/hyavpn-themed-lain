@@ -29,10 +29,46 @@ OPENVPN_MSI = os.path.join(tempfile.gettempdir(), "openvpn-setup.msi")
 
 DIST_ZIP_TMP = os.path.join(tempfile.gettempdir(), "hyavpn-dist.zip")
 
-PINK   = "#ff2d78"
-BLACK  = "#000000"
-GREEN  = "#00ff41"
-DIM    = "#3a1a28"
+PINK     = "#ff2d78"
+PINK_DIM = "#8a0038"
+BLACK    = "#000000"
+PANEL    = "#0a0005"
+GREEN    = "#00ff41"
+DIM      = "#3a1a28"
+RED      = "#ff0033"
+
+
+# ── Titlebar customizada (mesmo estilo/técnica do app principal — ver
+# _draw_titlebar_dots / _make_draggable / _setup_native_window em app.py) ──
+def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
+    close = canvas.create_oval(x, 11, x + 14, 25, fill=PINK, outline="")
+    canvas.tag_bind(close, "<Button-1>", lambda e: on_close())
+    canvas.tag_bind(close, "<Enter>", lambda e: canvas.itemconfig(close, fill=RED))
+    canvas.tag_bind(close, "<Leave>", lambda e: canvas.itemconfig(close, fill=PINK))
+    x += 22
+    if on_minimize:
+        mini = canvas.create_oval(x, 11, x + 14, 25, fill="", outline=PINK_DIM, width=2)
+        canvas.tag_bind(mini, "<Button-1>", lambda e: on_minimize())
+        canvas.tag_bind(mini, "<Enter>", lambda e: canvas.itemconfig(mini, outline=PINK))
+        canvas.tag_bind(mini, "<Leave>", lambda e: canvas.itemconfig(mini, outline=PINK_DIM))
+        x += 22
+    return x
+
+
+def _make_draggable(win, widgets):
+    drag = {"x": 0, "y": 0}
+
+    def _start(event):
+        drag["x"], drag["y"] = event.x, event.y
+
+    def _do_move(event):
+        x = win.winfo_pointerx() - drag["x"]
+        y = win.winfo_pointery() - drag["y"]
+        win.geometry(f"+{x}+{y}")
+
+    for w in widgets:
+        w.bind("<ButtonPress-1>", _start)
+        w.bind("<B1-Motion>", _do_move)
 
 
 def resource_path(relative_path):
@@ -62,10 +98,20 @@ class Installer(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("hyavpn setup")
-        self.geometry("500x400")
+        self.geometry("500x436")
         self.configure(bg=BLACK)
         self.resizable(False, False)
         self._release_info = None
+
+        # Mesma técnica do app principal: tira só os bits de estilo da
+        # titlebar nativa via WinAPI (em vez de overrideredirect), pra não
+        # ter o flash branco e pra bater visualmente com o app instalado.
+        if sys.platform == "win32":
+            self.withdraw()
+            self.after(10, self._setup_native_window)
+        else:
+            self.overrideredirect(True)
+
         try:
             if os.path.exists(ICON_ICO):
                 self.iconbitmap(ICON_ICO)
@@ -73,9 +119,47 @@ class Installer(tk.Tk):
             pass
         self._build()
 
+    def _setup_native_window(self):
+        import ctypes
+        GWL_STYLE, GWL_EXSTYLE = -16, -20
+        WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
+        WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW = 0x00040000, 0x00000080
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x0002, 0x0001, 0x0004, 0x0020
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            style = (style & ~(WS_CAPTION | WS_THICKFRAME)) | WS_MINIMIZEBOX | WS_SYSMENU
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+            exstyle = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            exstyle = (exstyle & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        except Exception:
+            self.overrideredirect(True)
+        self.deiconify()
+
+    def _minimize(self):
+        self.iconify()
+
     def _build(self):
+        titlebar = tk.Frame(self, bg=PANEL, height=36)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+
+        dots = tk.Canvas(titlebar, width=52, height=36, bg=PANEL, highlightthickness=0)
+        dots.pack(side="left", padx=(12, 0))
+        _draw_titlebar_dots(dots, 0, on_close=self.destroy, on_minimize=self._minimize)
+
+        tb_label = tk.Label(titlebar, text="hyavpn setup", font=("Courier New", 9),
+                             fg=DIM, bg=PANEL)
+        tb_label.pack(side="left", padx=8)
+
+        _make_draggable(self, [titlebar, tb_label])
+
         tk.Label(self, text="hyavpn", font=("Courier New", 28, "bold"),
-                 fg=PINK, bg=BLACK).pack(pady=(28, 2))
+                 fg=PINK, bg=BLACK).pack(pady=(20, 2))
         tk.Label(self, text="by hyafranch  //  installer",
                  font=("Courier New", 9), fg=DIM, bg=BLACK).pack()
 

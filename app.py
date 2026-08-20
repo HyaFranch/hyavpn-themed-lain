@@ -252,7 +252,35 @@ def _strip_native_decorations(win, appwindow=False):
 def _make_draggable(win, widgets):
     """Liga os widgets passados (normalmente a barra e o título) pra
     arrastar a janela pelo mouse -- perdido junto com a decoração nativa
-    quando a janela roda com overrideredirect(True)."""
+    quando a janela roda sem titlebar nativa.
+
+    No Windows, em vez de recalcular win.geometry() a cada pixel de
+    <B1-Motion> (o que competia com o resto do mainloop -- animação do
+    gif do personagem, redraw do canvas de fundo -- e causava o
+    "gaguejar"/glitch visual ao arrastar), a gente entrega o drag pro
+    próprio Windows: solta a captura do mouse e manda WM_NCLBUTTONDOWN
+    com HTCAPTION pro HWND, que é exatamente o que uma titlebar nativa
+    faz. Isso deixa o SO mover a janela (mesma rotina usada pela
+    titlebar de qualquer app nativo), sem nenhum redraw feito por nós
+    -- resultado é um arrasto liso, sem stutter.
+    Fora do Windows, cai pro método antigo baseado em geometry()."""
+    if sys.platform == "win32":
+        import ctypes
+        WM_NCLBUTTONDOWN = 0x00A1
+        HTCAPTION = 2
+
+        def _start_native_drag(event):
+            try:
+                hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+                ctypes.windll.user32.ReleaseCapture()
+                ctypes.windll.user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+            except Exception:
+                pass
+
+        for w in widgets:
+            w.bind("<ButtonPress-1>", _start_native_drag)
+        return
+
     drag = {"x": 0, "y": 0}
 
     def _start(event):
@@ -342,6 +370,28 @@ class VPNManager:
             return bool(data.get("split_tunnel", False))
         except Exception:
             return False
+
+    def _ovpn_is_stale(self):
+        """True se o hyavpn.ovpn em disco é de uma versão antiga (gerada
+        antes do fix de path com barra invertida) e precisa ser regerado.
+
+        setup() só roda quando o arquivo ainda NÃO existe -- então quem já
+        tinha um .ovpn salvo de antes desse fix ficava preso pra sempre com
+        um config quebrado (ca/cert/key com "C:\\Users\\..." cru), o que o
+        próprio OpenVPN acusa como "Bad backslash ('\\') usage" e nunca
+        completa o handshake (tunnel timeout), mesmo com o gerador atual
+        já correto. Aqui a gente detecta esse caso específico e invalida
+        o arquivo velho pra forçar uma regeneração limpa."""
+        try:
+            with open(self.OVPN_FILE, "r", encoding="utf-8") as f:
+                cfg = f.read()
+        except Exception:
+            return True
+        for line in cfg.splitlines():
+            s = line.strip()
+            if (s.startswith("ca ") or s.startswith("cert ") or s.startswith("key ")) and "\\" in s:
+                return True
+        return False
 
     def set_split_tunnel(self, enabled):
         self.split_tunnel = bool(enabled)
@@ -529,8 +579,8 @@ script-security 1
         if not openvpn:
             self.log("openvpn.exe not found. run the installer first.", "red")
             return False
-        if not os.path.exists(self.OVPN_FILE):
-            self.log("config not found, setting up...", "pink")
+        if not os.path.exists(self.OVPN_FILE) or self._ovpn_is_stale():
+            self.log("config missing or outdated, regenerating...", "pink")
             if not self.setup():
                 return False
 
@@ -892,8 +942,9 @@ class HyaVPN(ctk.CTk):
         self._play("connecting")
         self._log("initiating bypass...", "pink")
 
-        # Setup config se necessário
-        if not os.path.exists(self.vpn.OVPN_FILE):
+        # Setup config se necessário (arquivo ausente OU de versão antiga
+        # com paths quebrados -- ver VPNManager._ovpn_is_stale)
+        if not os.path.exists(self.vpn.OVPN_FILE) or self.vpn._ovpn_is_stale():
             self._log("fetching riseup config...", "dim")
             if not self.vpn.setup():
                 self._log("setup failed.", "red")
@@ -1183,7 +1234,7 @@ del "%~f0"
     def _open_settings(self):
         w = ctk.CTkToplevel(self)
         w.title("settings")
-        w.geometry("340x500")
+        w.geometry("340x560")
         w.configure(fg_color=C["bg"])
         w.resizable(False, False)
 
@@ -1221,7 +1272,15 @@ del "%~f0"
 
         _make_draggable(w, [w_hdr, w_title])
 
-        content = ctk.CTkFrame(w, fg_color="transparent", width=340, height=464)
+        # CTkScrollableFrame em vez de um CTkFrame comum: o conteúdo
+        # empilhado abaixo (slider, switch, botões, créditos) passava da
+        # altura fixa da janela e, sem scroll, os últimos widgets --
+        # [ REFRESH VPN CONFIG ], [ CHECK FOR UPDATES ], créditos, [ CLOSE ]
+        # -- ficavam empurrados pra fora da área visível (janela não é
+        # redimensionável), como se tivessem "sumido" ao abrir a settings.
+        content = ctk.CTkScrollableFrame(w, fg_color="transparent", width=320, height=520,
+                                          scrollbar_button_color=C["border"],
+                                          scrollbar_button_hover_color=C["pink_dim"])
         content.place(x=0, y=36)
 
         ctk.CTkLabel(content, text="// SETTINGS", font=FT, text_color=C["pink"]).pack(pady=(20, 4))
