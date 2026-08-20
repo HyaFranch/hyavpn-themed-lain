@@ -100,6 +100,20 @@ INSTALLER_HTML = r"""<!DOCTYPE html>
   #progress-bar { height:100%; background:var(--pink); width:0%;
     transition:width 0.4s ease; box-shadow:0 0 8px rgba(255,45,120,0.5); }
 
+  /* open-after-install checkbox */
+  #open-after-row {
+    display:flex; align-items:center; gap:8px;
+    width:440px; margin-top:12px;
+    font-size:9px; color:var(--dim); letter-spacing:1px;
+    cursor:pointer; user-select:none;
+  }
+  #open-after-row:hover { color:var(--white); }
+  #open-after-row input[type="checkbox"] {
+    width:12px; height:12px;
+    accent-color:var(--pink);
+    cursor:pointer;
+  }
+
   /* button */
   #btn-install {
     margin-top:14px;
@@ -138,6 +152,12 @@ INSTALLER_HTML = r"""<!DOCTYPE html>
   <div id="log"></div>
 
   <div id="progress-wrap"><div id="progress-bar"></div></div>
+
+  <label id="open-after-row">
+    <input type="checkbox" id="chk-open-after" checked
+           onchange="pywebview.api.set_open_after_install(this.checked)">
+    <span>abrir hyavpn depois de instalar</span>
+  </label>
 
   <button id="btn-install" onclick="pywebview.api.start_install()">[ INSTALL ]</button>
 </div>
@@ -184,9 +204,11 @@ class InstallerApi:
     """JS API for the installer webview."""
 
     def __init__(self, wh):
-        self._wh           = wh
-        self._release_info = None
-        self._skip_openvpn = False
+        self._wh                 = wh
+        self._release_info       = None
+        self._skip_openvpn       = False
+        self._open_after_install = True
+        self._install_succeeded  = False
 
     @property
     def _win(self):
@@ -208,8 +230,17 @@ class InstallerApi:
         self._js(f"installer.setProgress({pct})")
 
     def close_window(self):
+        if self._install_succeeded and self._open_after_install:
+            try:
+                exe_path = os.path.join(INSTALL_DIR, EXE_NAME)
+                subprocess.Popen([exe_path], cwd=INSTALL_DIR)
+            except Exception as e:
+                self._log(f"failed to launch hyavpn: {e}", "red")
         if self._win:
             self._win.destroy()
+
+    def set_open_after_install(self, checked: bool):
+        self._open_after_install = bool(checked)
 
     def minimize_window(self):
         if self._win:
@@ -244,6 +275,7 @@ class InstallerApi:
                     self._js("installer.onDone('[ RETRY ]')")
                     return
 
+        self._install_succeeded = True
         self._log("installation complete.", "green")
         self._status("// INSTALLED SUCCESSFULLY", "#00ff41")
         self._js("installer.onDone('[ CLOSE ]')")

@@ -10,7 +10,7 @@ import os
 import sys
 import json
 import math
-import pathlib
+import base64
 import shutil
 import socket
 import subprocess
@@ -20,7 +20,7 @@ import time
 import zipfile
 
 # ── Versão / Auto-update ─────────────────────────────────────────────────────
-__version__ = "1.0.0"
+__version__ = "1.6.7"
 GITHUB_REPO        = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST  = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET_NAME  = "hyavpn-dist.zip"
@@ -48,12 +48,14 @@ def resource_path(relative_path: str) -> str:
 
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
+_AUDIO_ERROR = None
 try:
     import pygame
     pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
     AUDIO = True
-except Exception:
+except Exception as e:
     AUDIO = False
+    _AUDIO_ERROR = f"{type(e).__name__}: {e}"
 
 
 # ── Split tunneling ───────────────────────────────────────────────────────────
@@ -120,9 +122,9 @@ class VPNManager:
     def _load_split_tunnel_pref(self) -> bool:
         try:
             with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return bool(json.load(f).get("split_tunnel", False))
+                return bool(json.load(f).get("split_tunnel", True))
         except Exception:
-            return False
+            return True
 
     def _load_discord_delay(self) -> int:
         try:
@@ -549,12 +551,14 @@ class JsApi:
         if not AUDIO:
             return
         path = resource_path(os.path.join("audio", f"{name}.mp3"))
-        if os.path.exists(path):
-            try:
-                pygame.mixer.music.load(path)
-                pygame.mixer.music.play()
-            except Exception:
-                pass
+        if not os.path.exists(path):
+            self._log(f"audio file not found: {path}", "red")
+            return
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+        except Exception as e:
+            self._log(f"audio playback failed ({name}): {e}", "red")
 
     # ── Overlay close ─────────────────────────────────────────────────────────
     def reset_to_idle(self):
@@ -698,15 +702,19 @@ def _build_html() -> str:
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
 
-    # Build asset URLs as absolute file:// URIs.
+    # Build asset URLs as embedded data: URIs (base64).
     # Quando o HTML é passado via `html=` para create_window (string em memória,
-    # não um arquivo), não existe uma base URL para resolver caminhos relativos
-    # como "assets/idle.gif" — por isso a imagem quebra. Convertendo para
-    # file:// com o caminho absoluto resolvido por resource_path(), o caminho
-    # funciona tanto rodando `python app.py` quanto no .exe do PyInstaller.
+    # não um arquivo), a página não tem origem file:// própria — e o WebView2/
+    # Chromium bloqueia o carregamento de recursos file:// referenciados por uma
+    # página assim, mesmo com o caminho absoluto correto (foi o que causou o
+    # GIF continuar quebrado depois de trocarmos pra file://). Embutindo o GIF
+    # direto como data:image/gif;base64,... não depende de origem nenhuma —
+    # funciona igual rodando `python app.py` ou no .exe do PyInstaller.
     def _asset_url(rel):
         p = resource_path(rel)
-        return pathlib.Path(p).resolve().as_uri()
+        with open(p, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return f"data:image/gif;base64,{b64}"
 
     inject = f"""<script>
 window._HYAVPN_VERSION = '{__version__}';
@@ -762,7 +770,7 @@ def main():
         height     = 640,
         resizable  = False,
         frameless  = True,         # no native chrome — our custom titlebar handles it
-        on_top     = False,
+        on_top     = True,          # fica por cima de todos os apps quando não minimizada
         background_color = "#000000",
         min_size   = (440, 640),
     )
@@ -771,6 +779,8 @@ def main():
     def on_loaded():
         # Log initial messages
         api._log("hyavpn initialised.", "green")
+        if not AUDIO:
+            api._log(f"audio disabled: {_AUDIO_ERROR}", "red")
         api._log("press AUTO BYPASS to start.", "dim")
         # Background update check
         threading.Thread(target=api._bg_update_check, daemon=True).start()
