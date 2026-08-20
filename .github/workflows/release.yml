@@ -7,6 +7,12 @@ on:
     tags:
       - "v*.*.*"
 
+# Necessário pro GITHUB_TOKEN poder criar o Release e subir os assets --
+# sem isso o passo "Create GitHub Release" falha com
+# "Resource not accessible by integration".
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
