@@ -53,6 +53,19 @@ except Exception:
 # ── Tema Accela ───────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 
+# Workaround para um bug conhecido do customtkinter no Windows: a função
+# interna que pinta a titlebar nativa de escuro (_windows_set_titlebar_color)
+# pode falhar com "TypeError: 'str' object is not callable" em certas
+# combinações de versão do Windows/customtkinter, ao tentar restaurar o foco
+# depois de repintar a janela. Desligamos só essa manipulação da titlebar
+# nativa (puramente cosmético) -- o app já desenha sua própria barra de
+# título customizada logo abaixo, então isso não muda a aparência de verdade.
+ctk.CTk._deactivate_windows_window_header_manipulation = True
+try:
+    ctk.CTkToplevel._deactivate_windows_window_header_manipulation = True
+except AttributeError:
+    pass
+
 C = {
     "bg":      "#000000",
     "panel":   "#0a0005",
