@@ -640,9 +640,17 @@
       <div class="stg-divider"></div>
 
       <div class="stg-label">DISCORD RESTART DELAY (s)</div>
-      <input type="range" id="delay-slider" min="2" max="30" step="1" value="10"
+      <input type="range" id="delay-slider" min="2" max="30" step="1" value="2"
              oninput="document.getElementById('delay-val').textContent=this.value+'s'; pywebview.api.set_delay(parseInt(this.value))">
-      <div id="delay-val">10s</div>
+      <div id="delay-val">2s</div>
+
+      <div class="stg-divider"></div>
+
+      <div class="stg-label">VPN HOLD AFTER DISCORD OPENS (s)</div>
+      <input type="range" id="hold-slider" min="2" max="60" step="1" value="5"
+             oninput="document.getElementById('hold-val').textContent=this.value+'s'; pywebview.api.set_vpn_hold(parseInt(this.value))">
+      <div id="hold-val">5s</div>
+      <div class="toggle-hint">tempo que a vpn continua ativa depois que o discord<br>reabre, antes de desconectar. aumente se estiver<br>caindo cedo demais.</div>
 
       <div class="stg-divider"></div>
 
@@ -709,6 +717,16 @@ window.addEventListener('DOMContentLoaded', () => {
   // fetch split pref
   pywebview.api.get_split_tunnel().then(v => {
     document.getElementById('toggle-split').checked = v;
+  });
+  // fetch discord restart delay
+  pywebview.api.get_delay().then(v => {
+    document.getElementById('delay-slider').value = v;
+    document.getElementById('delay-val').textContent = v + 's';
+  });
+  // fetch vpn hold duration
+  pywebview.api.get_vpn_hold().then(v => {
+    document.getElementById('hold-slider').value = v;
+    document.getElementById('hold-val').textContent = v + 's';
   });
 });
 

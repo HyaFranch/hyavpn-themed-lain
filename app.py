@@ -136,6 +136,7 @@ class VPNManager:
         os.makedirs(self.CONFIG_DIR, exist_ok=True)
         self.split_tunnel     = self._load_split_tunnel_pref()
         self.discord_delay_s  = self._load_discord_delay()
+        self.vpn_hold_s       = self._load_vpn_hold()
 
     # ── Prefs ────────────────────────────────────────────────────────────────
     def _load_split_tunnel_pref(self) -> bool:
@@ -148,9 +149,16 @@ class VPNManager:
     def _load_discord_delay(self) -> int:
         try:
             with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return int(json.load(f).get("discord_delay", 10))
+                return int(json.load(f).get("discord_delay", 2))
         except Exception:
-            return 10
+            return 2
+
+    def _load_vpn_hold(self) -> int:
+        try:
+            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return int(json.load(f).get("vpn_hold", 5))
+        except Exception:
+            return 5
 
     def _save_settings(self):
         try:
@@ -160,6 +168,7 @@ class VPNManager:
                     data = json.load(f)
             data["split_tunnel"]   = self.split_tunnel
             data["discord_delay"]  = self.discord_delay_s
+            data["vpn_hold"]       = self.vpn_hold_s
             with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception as e:
@@ -171,6 +180,10 @@ class VPNManager:
 
     def set_discord_delay(self, seconds: int):
         self.discord_delay_s = max(2, min(30, int(seconds)))
+        self._save_settings()
+
+    def set_vpn_hold(self, seconds: int):
+        self.vpn_hold_s = max(2, min(60, int(seconds)))
         self._save_settings()
 
     # ── Config ───────────────────────────────────────────────────────────────
@@ -415,7 +428,7 @@ class JsApi:
         self._wh        = window_ref_holder   # {"win": None}
         self._vpn       = None                # set after init
         self._update_info = None
-        self._discord_delay = 10
+        self._discord_delay = 2
 
     @property
     def _win(self):
@@ -456,10 +469,20 @@ class JsApi:
         if self._vpn:
             self._vpn.set_split_tunnel(bool(enabled))
 
+    def get_delay(self) -> int:
+        return self._vpn.discord_delay_s if self._vpn else 10
+
     def set_delay(self, seconds: int):
         if self._vpn:
             self._vpn.set_discord_delay(int(seconds))
         self._discord_delay = int(seconds)
+
+    def get_vpn_hold(self) -> int:
+        return self._vpn.vpn_hold_s if self._vpn else 5
+
+    def set_vpn_hold(self, seconds: int):
+        if self._vpn:
+            self._vpn.set_vpn_hold(int(seconds))
 
     def refresh_config(self):
         if not self._vpn:
@@ -517,7 +540,9 @@ class JsApi:
         else:
             self._log("discord took too long.", "red")
 
-        time.sleep(3)
+        hold_s = self._vpn.vpn_hold_s
+        self._log(f"holding tunnel {hold_s}s more...", "dim")
+        time.sleep(hold_s)
 
         self._log("releasing tunnel...", "dim")
         self._vpn.disconnect()
