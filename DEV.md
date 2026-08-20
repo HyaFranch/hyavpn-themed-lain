@@ -112,7 +112,7 @@ python app.py
 
 Pra gerar os exes manualmente (sem esperar o CI):
 ```
-pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" app.py
+pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" --uac-admin app.py
 pyinstaller --onefile --windowed --name hyavpn-setup --icon icons/icon.ico --add-data "icons;icons" --uac-admin installer/setup.py
 ```
 

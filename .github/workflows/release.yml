@@ -35,7 +35,7 @@ jobs:
 
       - name: Build app exe with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" app.py
+          pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" --uac-admin app.py
 
       - name: Assemble distribution package
         shell: pwsh

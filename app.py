@@ -254,46 +254,39 @@ def _make_draggable(win, widgets):
     arrastar a janela pelo mouse -- perdido junto com a decoração nativa
     quando a janela roda sem titlebar nativa.
 
-    No Windows, em vez de recalcular win.geometry() a cada pixel de
-    <B1-Motion> (o que competia com o resto do mainloop -- animação do
-    gif do personagem, redraw do canvas de fundo -- e causava o
-    "gaguejar"/glitch visual ao arrastar), a gente entrega o drag pro
-    próprio Windows: solta a captura do mouse e manda WM_NCLBUTTONDOWN
-    com HTCAPTION pro HWND, que é exatamente o que uma titlebar nativa
-    faz. Isso deixa o SO mover a janela (mesma rotina usada pela
-    titlebar de qualquer app nativo), sem nenhum redraw feito por nós
-    -- resultado é um arrasto liso, sem stutter.
-    Fora do Windows, cai pro método antigo baseado em geometry()."""
-    if sys.platform == "win32":
-        import ctypes
-        WM_NCLBUTTONDOWN = 0x00A1
-        HTCAPTION = 2
-
-        def _start_native_drag(event):
-            try:
-                hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
-                ctypes.windll.user32.ReleaseCapture()
-                ctypes.windll.user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
-            except Exception:
-                pass
-
-        for w in widgets:
-            w.bind("<ButtonPress-1>", _start_native_drag)
-        return
-
+    Nota: cheguei a testar entregar o arrasto pro Windows via
+    ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION (o mesmo truque que uma
+    titlebar nativa usa) pra evitar redraw nosso durante o drag, mas essa
+    chamada abre um loop de mensagens do Windows aninhado *dentro* do
+    callback do Tcl -- e o Tcl/Tk não lida bem em ser reentrado assim
+    (trava/crasha em vários combos de versão). Voltei pro drag manual via
+    geometry(), só que:
+      1) usando event.x_root/y_root direto (o que o próprio evento do Tk
+         já entrega) em vez de consultar winfo_pointerx()/y() -- que fazem
+         uma ida-e-volta a mais no sistema por chamada;
+      2) avisando a janela (win._dragging) pra ela pausar o redraw
+         periódico do fundo (ver HyaVPN._tick) enquanto o botão do mouse
+         está pressionado -- era essa repintura brigando com o drag,
+         quadro a quadro, a causa real do "gaguejar" visual.
+    """
     drag = {"x": 0, "y": 0}
 
     def _start(event):
         drag["x"], drag["y"] = event.x, event.y
+        win._dragging = True
 
     def _do_move(event):
-        x = win.winfo_pointerx() - drag["x"]
-        y = win.winfo_pointery() - drag["y"]
+        x = event.x_root - drag["x"]
+        y = event.y_root - drag["y"]
         win.geometry(f"+{x}+{y}")
+
+    def _stop(event):
+        win._dragging = False
 
     for w in widgets:
         w.bind("<ButtonPress-1>", _start)
         w.bind("<B1-Motion>", _do_move)
+        w.bind("<ButtonRelease-1>", _stop)
 
 
 # ── Split tunneling ──────────────────────────────────────────────────────────
@@ -1105,7 +1098,12 @@ class HyaVPN(ctk.CTk):
     def _tick(self):
         self._t += 0.035
         self._scan_y = (self._scan_y + 3) % 640
-        self._draw_bg()
+        # Enquanto a janela está sendo arrastada (ver _make_draggable),
+        # pula a repintura do fundo -- é essa repintura em loop brigando
+        # com o drag, quadro a quadro, que causava o "gaguejar" visual.
+        # O timer continua rodando, só a repintura fica em pausa.
+        if not getattr(self, "_dragging", False):
+            self._draw_bg()
         if self._glitch:
             txt = glitch("hyavpn", 0.25)
             self.title_lbl.configure(text=txt)
@@ -1281,7 +1279,7 @@ del "%~f0"
         content = ctk.CTkScrollableFrame(w, fg_color="transparent", width=320, height=520,
                                           scrollbar_button_color=C["border"],
                                           scrollbar_button_hover_color=C["pink_dim"])
-        content.place(x=0, y=36)
+        content.place(x=0, y=36, width=340, height=520)
 
         ctk.CTkLabel(content, text="// SETTINGS", font=FT, text_color=C["pink"]).pack(pady=(20, 4))
         ctk.CTkFrame(content, fg_color=C["border"], height=1).pack(fill="x", padx=20, pady=8)
@@ -1343,7 +1341,52 @@ del "%~f0"
                       command=w.destroy).pack(pady=16)
 
 
+def _ensure_admin():
+    """OpenVPN precisa de privilégio de administrador pra criar/configurar
+    o adaptador TAP e mexer nas rotas (netsh) no Windows -- sem isso, a
+    conexão sobe até abrir o tun mas trava em erros tipo:
+
+        TUN: Setting IPv4 mtu failed: Acesso negado.
+        NETSH: ... ERROR: command failed: returned error code 1
+        Exiting due to fatal error
+
+    O instalador (installer/setup.py) já pede elevação (--uac-admin), mas
+    o app em si nunca pedia -- só o hyavpn-setup.exe. Isso deixava
+    QUALQUER conexão falhando (com timeout) pra quem não abrisse o app já
+    "Executar como administrador" manualmente. Aqui a gente checa e, se
+    não estiver elevado, relança o próprio processo com elevação (prompt
+    do UAC) e fecha a instância sem privilégio."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception:
+        is_admin = True  # não trava o app se a checagem falhar por algum motivo
+    if is_admin:
+        return
+
+    try:
+        if getattr(sys, "frozen", False):
+            # rodando como .exe compilado (PyInstaller) -- relança o próprio exe
+            target, params = sys.executable, ""
+        else:
+            # rodando via "python app.py" (dev) -- relança o python com o
+            # script e os mesmos argumentos
+            target = sys.executable
+            params = subprocess.list2cmdline([os.path.abspath(__file__)] + sys.argv[1:])
+
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, params, None, 1)
+        if rc > 32:  # ShellExecuteW retorna >32 em sucesso
+            sys.exit(0)
+        # rc <= 32 -- usuário cancelou o UAC ou falhou; segue sem elevação
+        # em vez de travar o app, só o AUTO BYPASS vai falhar de novo depois
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _ensure_admin()
     _single_instance_socket = acquire_single_instance_lock()
     if _single_instance_socket is None:
         # já existe uma instância rodando — não deixa abrir uma segunda vpn
