@@ -193,6 +193,8 @@ class VPNManager:
                 cfg = f.read()
         except Exception:
             return True
+        if 'pull-filter ignore "ifconfig-ipv6"' not in cfg:
+            return True
         for line in cfg.splitlines():
             s = line.strip()
             if (s.startswith("ca ") or s.startswith("cert ") or s.startswith("key ")) and "\\" in s:
@@ -291,6 +293,14 @@ class VPNManager:
             "resolv-retry infinite\nnobind\npersist-key\npersist-tun\n"
             f'ca "{ca_path}"\ncert "{cert_path}"\nkey "{cert_path}"\n'
             f"cipher {cipher}\nauth {auth}\nverb 1\nmute 3\nscript-security 1\n"
+            # o gateway riseup empurra config de ipv6 (ifconfig-ipv6/route-ipv6).
+            # o openvpn tenta aplicar isso via `netsh interface ipv6 ...`, e em
+            # PCs com ipv6 desabilitado/desmarcado no adaptador esse comando
+            # falha com "returned error code 1" -> erro fatal -> tunnel timeout.
+            # como o app só precisa de ipv4 pro discord, simplesmente ignoramos
+            # qualquer opção de ipv6 que o servidor tente empurrar.
+            'pull-filter ignore "ifconfig-ipv6"\n'
+            'pull-filter ignore "route-ipv6"\n'
         )
         if tls_cipher:
             ovpn += f"tls-cipher {tls_cipher}\n"
