@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 
 # ── Versão / Auto-update ─────────────────────────────────────────────────────
-__version__ = "1.0.0"
+__version__ = "1.6.7"
 GITHUB_REPO = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "hyavpn-dist.zip"   # nome do asset publicado em cada Release
@@ -260,25 +260,41 @@ def _make_draggable(win, widgets):
     chamada abre um loop de mensagens do Windows aninhado *dentro* do
     callback do Tcl -- e o Tcl/Tk não lida bem em ser reentrado assim
     (trava/crasha em vários combos de versão). Voltei pro drag manual via
-    geometry(), só que:
-      1) usando event.x_root/y_root direto (o que o próprio evento do Tk
-         já entrega) em vez de consultar winfo_pointerx()/y() -- que fazem
-         uma ida-e-volta a mais no sistema por chamada;
-      2) avisando a janela (win._dragging) pra ela pausar o redraw
-         periódico do fundo (ver HyaVPN._tick) enquanto o botão do mouse
-         está pressionado -- era essa repintura brigando com o drag,
-         quadro a quadro, a causa real do "gaguejar" visual.
+    geometry(), com dois cuidados a mais:
+
+      1) COALESCE dos eventos de <B1-Motion>: o mouse gera esses eventos
+         muito mais rápido do que a janela consegue reposicionar +
+         redesenhar. Chamar win.geometry() direto em CADA evento enfileira
+         updates -- a janela fica "atrasada" atrás do cursor e depois
+         processa tudo de uma vez (o salto/bug visual que você viu). Agora
+         cada <B1-Motion> só guarda a posição mais nova; um único
+         after(1, ...) por vez aplica sempre a posição mais recente,
+         descartando as intermediárias -- no máximo 1 geometry() por
+         "tick" do mainloop, em vez de 1 por evento de mouse.
+      2) win._dragging fica True do <ButtonPress-1> até o <ButtonRelease-1>
+         -- HyaVPN._tick (fundo animado) e _animate_gif (personagem)
+         checam essa flag e pausam a própria repintura enquanto arrasta,
+         já que competir pelo redraw durante o drag era a causa do
+         conteúdo "bugando" junto com a janela atrasando.
     """
     drag = {"x": 0, "y": 0}
+    pending = {"x": None, "y": None, "scheduled": False}
+
+    def _apply_move():
+        pending["scheduled"] = False
+        if pending["x"] is not None:
+            win.geometry(f"+{pending['x']}+{pending['y']}")
 
     def _start(event):
         drag["x"], drag["y"] = event.x, event.y
         win._dragging = True
 
     def _do_move(event):
-        x = event.x_root - drag["x"]
-        y = event.y_root - drag["y"]
-        win.geometry(f"+{x}+{y}")
+        pending["x"] = event.x_root - drag["x"]
+        pending["y"] = event.y_root - drag["y"]
+        if not pending["scheduled"]:
+            pending["scheduled"] = True
+            win.after(1, _apply_move)
 
     def _stop(event):
         win._dragging = False
@@ -897,10 +913,16 @@ class HyaVPN(ctk.CTk):
         self.char_canvas.create_image(110, 110, image=img)
 
     def _animate_gif(self, frames, duration):
-        self.char_canvas.delete("all")
-        frame = frames[self._gif_frame_idx]
-        self._char_img = frame  # segura referência p/ não ser coletada pelo GC
-        self.char_canvas.create_image(110, 110, image=frame)
+        # Pausa a repintura do personagem enquanto a janela está sendo
+        # arrastada (ver _make_draggable) -- senão esse redraw a cada
+        # frame do gif competia com o reposicionamento da janela e era
+        # parte do conteúdo "bugando" durante o drag. Só pula o desenho;
+        # o timer do gif continua agendado normalmente.
+        if not getattr(self, "_dragging", False):
+            self.char_canvas.delete("all")
+            frame = frames[self._gif_frame_idx]
+            self._char_img = frame  # segura referência p/ não ser coletada pelo GC
+            self.char_canvas.create_image(110, 110, image=frame)
         self._gif_frame_idx = (self._gif_frame_idx + 1) % len(frames)
         self._gif_anim_job = self.after(max(duration, 20), lambda: self._animate_gif(frames, duration))
 
