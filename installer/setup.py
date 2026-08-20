@@ -9,7 +9,7 @@ pede elevação de administrador sozinho ao abrir — não precisa "executar
 como administrador" manualmente.
 """
 
-import os, sys, subprocess, shutil, urllib.request, ssl, json, zipfile, tempfile, winreg
+import os, sys, subprocess, shutil, urllib.request, urllib.error, ssl, json, zipfile, tempfile, winreg, time
 import tkinter as tk
 from tkinter import ttk
 import threading
@@ -56,11 +56,21 @@ def _draw_titlebar_dots(canvas, x, on_close, on_minimize=None):
 
 
 def _make_draggable(win, widgets):
-    """Mesma técnica do app principal (ver _make_draggable em app.py):
-    coalesce dos eventos de <B1-Motion> -- só a posição mais recente do
-    mouse é aplicada por tick do mainloop (no máx. 1 geometry() por vez,
-    em vez de 1 por evento de mouse cru), pra não deixar a janela
-    "atrasada" atrás do cursor durante o arrasto."""
+    """Arrasto manual, só reposiciona (+x+y) -- NUNCA toca em largura/altura.
+
+    Antes isso usava o truque nativo (ReleaseCapture + WM_NCLBUTTONDOWN/
+    HTCAPTION) pra deixar o Windows mover a janela direto. Só que essa
+    técnica, combinada com a titlebar nativa removida via SetWindowLongW
+    (ver _setup_native_window) num processo que não se declara "DPI aware",
+    faz o Windows reescalar a janela em tempo real durante o arrasto em
+    telas com escala >100% (125%/150%, comum em notebook) -- resultado:
+    a janela "engorda" a cada frame enquanto você arrasta.
+
+    Aqui o Python nunca chama nada com largura/altura durante o drag --
+    só "+x+y" -- então não tem como a janela crescer, não importa o que o
+    Windows esteja fazendo de escala por baixo. Os eventos de <B1-Motion>
+    são "coalescidos" (só a última posição pendente é aplicada) pra não
+    enfileirar updates e travar o arrasto."""
     drag = {"x": 0, "y": 0}
     pending = {"x": None, "y": None, "scheduled": False}
 
@@ -82,6 +92,26 @@ def _make_draggable(win, widgets):
     for w in widgets:
         w.bind("<ButtonPress-1>", _start)
         w.bind("<B1-Motion>", _do_move)
+
+
+def _set_dpi_aware():
+    """Declara o processo como DPI-aware (Per-Monitor V2, com fallback pra
+    versões mais antigas do Windows). Isso PRECISA rodar antes de qualquer
+    janela Tk ser criada -- é a causa raiz do bug de janela crescendo ao
+    arrastar em telas com escala: sem isso o Windows "virtualiza" o DPI do
+    processo e reescala a janela por conta própria em vários momentos,
+    inclusive durante o SetWindowPos(SWP_FRAMECHANGED) que tira a titlebar
+    nativa em _setup_native_window."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()  # fallback Windows 7/8
+    except Exception:
+        pass
 
 
 def resource_path(relative_path):
@@ -203,16 +233,42 @@ class Installer(tk.Tk):
         self.btn.pack(pady=12)
 
     def _log(self, msg, tag="dim"):
+        """Thread-safe -- _install roda numa thread de background (ver
+        _start) e chama isso direto. Igual ao mesmo bug do app principal:
+        mexer em widget Tk fora da main thread derruba com 'RuntimeError:
+        main thread is not in main loop'. Se não é a main thread, reagenda
+        via self.after(0, ...) em vez de tocar no widget."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._log(msg, tag))
+            return
         self.log_box.configure(state="normal")
         import time
         self.log_box.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n", tag)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
-        self.update()
 
     def _set_status(self, msg, color=GREEN):
+        """Thread-safe (mesmo motivo do _log acima)."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._set_status(msg, color))
+            return
         self.status.configure(text=msg, fg=color)
-        self.update()
+
+    def _set_progress(self, pct):
+        """Thread-safe -- substitui o antigo 'self.progress[\"value\"] = pct'
+        direto dentro de _install (rodando em background thread)."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._set_progress(pct))
+            return
+        self.progress["value"] = pct
+
+    def _set_btn(self, **kwargs):
+        """Thread-safe reconfigure do botão de instalar (chamado no fim de
+        _install, que roda em background thread)."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._set_btn(**kwargs))
+            return
+        self.btn.configure(**kwargs)
 
     def _start(self):
         self.btn.configure(state="disabled")
@@ -232,21 +288,19 @@ class Installer(tk.Tk):
         for label, fn, pct in steps:
             self._set_status(f"// {label}...")
             self._log(label, "pink")
-            self.progress["value"] = pct
-            self.update()
+            self._set_progress(pct)
             if fn:
                 try:
                     fn()
                 except Exception as e:
                     self._log(f"error: {e}", "red")
                     self._set_status("installation failed.", PINK)
-                    self.btn.configure(state="normal", text="[ RETRY ]")
+                    self._set_btn(state="normal", text="[ RETRY ]")
                     return
 
         self._log("installation complete.", "green")
         self._set_status("// INSTALLED SUCCESSFULLY", GREEN)
-        self.btn.configure(state="normal", text="[ CLOSE ]",
-                           command=self.destroy)
+        self._set_btn(state="normal", text="[ CLOSE ]", command=self.destroy)
 
     # ── Passos ─────────────────────────────────────────────────────────────────
     def _step_dirs(self):
@@ -254,11 +308,50 @@ class Installer(tk.Tk):
         os.makedirs(APPDATA_DIR, exist_ok=True)
         self._log(f"install dir: {INSTALL_DIR}", "dim")
 
+    def _github_get(self, url, timeout, retries=3):
+        """GET com retry (backoff) e mensagens de erro específicas -- em vez
+        de deixar o urllib.error.HTTPError genérico virar 'error: HTTP
+        Error 403: rate limit exceeded' sem explicação nenhuma no log.
+
+        A causa mais comum de "não baixa nada" é a API do GitHub sem
+        autenticação: limite de 60 requisições/hora POR IP. Se você estiver
+        atrás de CGNAT (comum em operadora de celular/banda larga no
+        Brasil), esse IP é compartilhado com um monte de outros clientes e
+        o limite estoura fácil -- não é algo que dá pra "consertar" no
+        instalador, só esperar a janela de 1h resetar (ou usar outra
+        rede)."""
+        ctx = ssl.create_default_context()
+        last_err = None
+        for attempt in range(1, retries + 1):
+            req = urllib.request.Request(url, headers={"User-Agent": "hyavpn-installer"})
+            try:
+                return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code == 403 or e.code == 429:
+                    raise RuntimeError(
+                        "GitHub API rate limit excedido pro seu IP (limite anônimo: "
+                        "60 requisições/hora). Espere uns minutos e tente de novo, "
+                        "ou troque de rede (isso é comum em conexões com IP "
+                        "compartilhado / CGNAT)."
+                    ) from e
+                if e.code == 404:
+                    raise RuntimeError(
+                        f"nenhum Release publicado em github.com/{GITHUB_REPO}/releases "
+                        f"(ou repositório/URL errado). Publique uma release com a tag "
+                        f"vX.Y.Z pra API encontrar o asset."
+                    ) from e
+                # outros HTTP errors (5xx etc) valem retry
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last_err = e
+            if attempt < retries:
+                self._log(f"falhou (tentativa {attempt}/{retries}), tentando de novo...", "dim")
+                time.sleep(1.5 * attempt)
+        raise RuntimeError(f"falha de rede ao acessar {url}: {last_err}") from last_err
+
     def _step_fetch_release(self):
         """Consulta o último Release publicado no GitHub e localiza o asset de distribuição."""
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(GITHUB_API_LATEST, headers={"User-Agent": "hyavpn-installer"})
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+        with self._github_get(GITHUB_API_LATEST, timeout=15) as r:
             data = json.loads(r.read())
 
         tag = data.get("tag_name", "unknown")
@@ -280,9 +373,7 @@ class Installer(tk.Tk):
     def _step_download_dist(self):
         url = self._release_info["asset_url"]
         self._log(f"downloading {DIST_ASSET_NAME}...", "dim")
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(url, headers={"User-Agent": "hyavpn-installer"})
-        with urllib.request.urlopen(req, context=ctx, timeout=60) as r, open(DIST_ZIP_TMP, "wb") as f:
+        with self._github_get(url, timeout=60) as r, open(DIST_ZIP_TMP, "wb") as f:
             shutil.copyfileobj(r, f)
         self._log("download complete.", "green")
 
@@ -373,5 +464,6 @@ $SC.Save()
 
 
 if __name__ == "__main__":
+    _set_dpi_aware()
     app = Installer()
     app.mainloop()

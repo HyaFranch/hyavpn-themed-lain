@@ -267,29 +267,24 @@ def _make_draggable(win, widgets):
     arrastar a janela pelo mouse -- perdido junto com a decoração nativa
     quando a janela roda sem titlebar nativa.
 
-    Nota: cheguei a testar entregar o arrasto pro Windows via
-    ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION (o mesmo truque que uma
-    titlebar nativa usa) pra evitar redraw nosso durante o drag, mas essa
-    chamada abre um loop de mensagens do Windows aninhado *dentro* do
-    callback do Tcl -- e o Tcl/Tk não lida bem em ser reentrado assim
-    (trava/crasha em vários combos de versão). Voltei pro drag manual via
-    geometry(), com dois cuidados a mais:
+    Arrasto manual: só reposiciona (+x+y), NUNCA toca em largura/altura.
 
-      1) COALESCE dos eventos de <B1-Motion>: o mouse gera esses eventos
-         muito mais rápido do que a janela consegue reposicionar +
-         redesenhar. Chamar win.geometry() direto em CADA evento enfileira
-         updates -- a janela fica "atrasada" atrás do cursor e depois
-         processa tudo de uma vez (o salto/bug visual que você viu). Agora
-         cada <B1-Motion> só guarda a posição mais nova; um único
-         after(1, ...) por vez aplica sempre a posição mais recente,
-         descartando as intermediárias -- no máximo 1 geometry() por
-         "tick" do mainloop, em vez de 1 por evento de mouse.
-      2) win._dragging fica True do <ButtonPress-1> até o <ButtonRelease-1>
-         -- HyaVPN._tick (fundo animado) e _animate_gif (personagem)
-         checam essa flag e pausam a própria repintura enquanto arrasta,
-         já que competir pelo redraw durante o drag era a causa do
-         conteúdo "bugando" junto com a janela atrasando.
-    """
+    Antes isso entregava o arrasto pro SO via ReleaseCapture() +
+    SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION) pra ganhar performance (o
+    compositor do Windows move a janela sem o Python no meio do caminho a
+    cada frame). O problema: combinado com a titlebar nativa removida via
+    SetWindowLongW (ver _strip_native_decorations) num processo que não se
+    declara "DPI aware", isso faz o Windows reescalar a janela em tempo
+    real durante o arrasto em telas com escala >100% (125%/150%, comum em
+    notebook) -- e ela cresce pros lados a cada frame que você arrasta.
+
+    Agora o Python nunca chama geometry() com largura/altura durante o
+    drag -- só "+x+y" -- então é fisicamente impossível a janela crescer
+    aqui, não importa o que o Windows faça de escala por baixo. Os
+    eventos de <B1-Motion> são coalescidos (só a última posição pendente
+    é aplicada) pra não enfileirar updates. `win._dragging` fica True
+    durante o arrasto pra pausar redraws pesados (GIF, etc. -- ver uso
+    logo abaixo em _draw_frame / _update_title)."""
     drag = {"x": 0, "y": 0}
     pending = {"x": None, "y": None, "scheduled": False}
 
@@ -299,8 +294,8 @@ def _make_draggable(win, widgets):
             win.geometry(f"+{pending['x']}+{pending['y']}")
 
     def _start(event):
-        drag["x"], drag["y"] = event.x, event.y
         win._dragging = True
+        drag["x"], drag["y"] = event.x, event.y
 
     def _do_move(event):
         pending["x"] = event.x_root - drag["x"]
@@ -309,13 +304,32 @@ def _make_draggable(win, widgets):
             pending["scheduled"] = True
             win.after(1, _apply_move)
 
-    def _stop(event):
+    def _end(event):
         win._dragging = False
 
     for w in widgets:
         w.bind("<ButtonPress-1>", _start)
         w.bind("<B1-Motion>", _do_move)
-        w.bind("<ButtonRelease-1>", _stop)
+        w.bind("<ButtonRelease-1>", _end)
+
+
+def _set_dpi_aware():
+    """Declara o processo como DPI-aware (Per-Monitor V2, com fallback pra
+    versões mais antigas do Windows). PRECISA rodar antes de qualquer
+    janela Tk ser criada -- é a causa raiz do bug de janela crescendo ao
+    arrastar em telas com escala: sem isso o Windows "virtualiza" o DPI do
+    processo e reescala a janela por conta própria, inclusive durante o
+    SetWindowPos(SWP_FRAMECHANGED) que tira a titlebar nativa."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()  # fallback Windows 7/8
+    except Exception:
+        pass
 
 
 # ── Split tunneling ──────────────────────────────────────────────────────────
@@ -941,6 +955,16 @@ class HyaVPN(ctk.CTk):
 
     # ── Log ────────────────────────────────────────────────────────────────────
     def _log(self, msg, tag="dim"):
+        """Thread-safe: _flow, _check_update_bg e _apply_update rodam em
+        threads de background e chamam isso direto. Tkinter só permite
+        mexer em widgets na main thread -- chamar daqui de outra thread
+        derrubava com 'RuntimeError: main thread is not in main loop'
+        (mais rígido a partir do Python 3.13/3.14). Se não estamos na main
+        thread, reagenda a própria chamada via self.after(0, ...) em vez
+        de tocar no widget direto."""
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda: self._log(msg, tag))
+            return
         ts = time.strftime("%H:%M:%S")
         self.term.configure(state="normal")
         self.term.insert("end", f"[{ts}] {msg}\n", tag)
@@ -1421,6 +1445,7 @@ def _ensure_admin():
 
 
 if __name__ == "__main__":
+    _set_dpi_aware()
     _ensure_admin()
     _single_instance_socket = acquire_single_instance_lock()
     if _single_instance_socket is None:
