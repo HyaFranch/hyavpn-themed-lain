@@ -1,0 +1,61 @@
+name: Build & Release hyavpn
+
+# Roda automaticamente quando você criar uma tag tipo v1.0.0, v1.1.0, etc.
+# Ex: git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Fixado em 3.12 -- versão com wheels prontos pra tudo (customtkinter,
+          # Pillow, pygame etc), evita o problema de compilar do zero em
+          # versões muito novas do Python.
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build app exe with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name hyavpn --icon icons/icon.ico --add-data "icons;icons" app.py
+
+      - name: Assemble distribution package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist_package | Out-Null
+          Copy-Item dist\hyavpn.exe dist_package\
+          Copy-Item -Recurse assets dist_package\assets
+          Copy-Item -Recurse audio dist_package\audio
+          Copy-Item -Recurse icons dist_package\icons
+          Compress-Archive -Path dist_package\* -DestinationPath hyavpn-dist.zip -Force
+
+      - name: Build installer exe with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name hyavpn-setup --icon icons/icon.ico --add-data "icons;icons" --uac-admin installer/setup.py
+
+      - name: Collect installer exe
+        shell: pwsh
+        run: |
+          Copy-Item dist\hyavpn-setup.exe .\hyavpn-setup.exe
+
+      - name: Create GitHub Release + upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hyavpn-dist.zip
+            hyavpn-setup.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,8 @@
+# Usado apenas para desenvolvimento e para o build automático (PyInstaller/CI).
+# O usuário final NÃO precisa instalar nada disso -- ele só baixa o installer,
+# que puxa o .exe já compilado do GitHub Releases.
+customtkinter>=5.2.0
+Pillow>=10.0.0
+psutil>=5.9.0
+pygame>=2.5.0
+pyinstaller>=6.0.0
