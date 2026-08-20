@@ -558,8 +558,9 @@ class HyaVPN(ctk.CTk):
 
         # Status pill
         sf = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=4,
-                           border_width=1, border_color=C["border"])
-        sf.place(x=16, y=284, width=408, height=54)
+                           border_width=1, border_color=C["border"],
+                           width=408, height=54)
+        sf.place(x=16, y=284)
 
         self.dot = tk.Canvas(sf, width=10, height=10, bg=C["panel"], highlightthickness=0)
         self.dot.place(x=12, y=21)
@@ -585,8 +586,9 @@ class HyaVPN(ctk.CTk):
 
         # Terminal
         tf = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=2,
-                           border_width=1, border_color=C["border"])
-        tf.place(x=16, y=426, width=408, height=192)
+                           border_width=1, border_color=C["border"],
+                           width=408, height=192)
+        tf.place(x=16, y=426)
 
         ctk.CTkLabel(tf, text="// SYSTEM LOG", font=FX,
                      text_color=C["pink_dim"], anchor="w").place(x=8, y=4)
@@ -817,8 +819,9 @@ class HyaVPN(ctk.CTk):
 
     # ── Success overlay ────────────────────────────────────────────────────────
     def _show_success(self):
-        self.ov = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0)
-        self.ov.place(x=0, y=46, relwidth=1, height=594)
+        self.ov = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0,
+                                width=440, height=594)
+        self.ov.place(x=0, y=46, relwidth=1)
 
         self.ov_canvas = tk.Canvas(self.ov, bg=C["bg"], highlightthickness=0, width=440, height=240)
         self.ov_canvas.pack(pady=(24, 0))
