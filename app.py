@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import math
+import re
 import base64
 import shutil
 import socket
@@ -156,9 +157,9 @@ class VPNManager:
     def _load_vpn_hold(self) -> int:
         try:
             with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return int(json.load(f).get("vpn_hold", 5))
+                return int(json.load(f).get("vpn_hold", 18))
         except Exception:
-            return 5
+            return 18
 
     def _save_settings(self):
         try:
@@ -200,6 +201,68 @@ class VPNManager:
             if (s.startswith("ca ") or s.startswith("cert ") or s.startswith("key ")) and "\\" in s:
                 return True
         return False
+
+    def _pick_gateway(self, eip: dict):
+        """Escolhe o gateway openvpn com menor latência, evitando o Brasil.
+
+        O eip-service.json do riseup traz `location` em cada gateway,
+        referenciando `locations[<key>]["country_code"]`. Filtramos fora
+        "BR" e cronometramos os candidatos restantes com ping; fica com o
+        mais rápido. Se nenhum ping responder (bloqueio de ICMP é comum em
+        gateway de VPN) ou todos forem BR, cai de volta pro primeiro
+        gateway openvpn disponível, sem filtro.
+        """
+        locations = eip.get("locations", {})
+        gateways  = eip.get("gateways", [])
+
+        candidates = []
+        for g in gateways:
+            for t in g.get("capabilities", {}).get("transport", []):
+                if t.get("type") == "openvpn":
+                    loc_key = g.get("location", "")
+                    country = locations.get(loc_key, {}).get("country_code", "??")
+                    candidates.append({
+                        "ip":      g["ip_address"],
+                        "port":    t.get("ports",     ["1194"])[0],
+                        "proto":   t.get("protocols", ["udp"])[0],
+                        "country": country,
+                    })
+                    break
+
+        if not candidates:
+            return None
+
+        non_br = [c for c in candidates if c["country"] != "BR"]
+        pool = non_br if non_br else candidates
+
+        self.log(f"testing latency of {len(pool)} gateway(s) outside brazil..."
+                  if non_br else
+                  "no non-brazil gateways found, using first available...", "pink")
+
+        best      = None
+        best_ms   = None
+        for c in pool:
+            ms = self._ping_ms(c["ip"])
+            if ms is not None:
+                self.log(f"  {c['country']} {c['ip']}: {ms}ms", "dim")
+                if best_ms is None or ms < best_ms:
+                    best_ms, best = ms, c
+
+        return best or pool[0]
+
+    @staticmethod
+    def _ping_ms(ip: str):
+        """1 ping rápido (timeout 800ms); retorna o RTT em ms ou None."""
+        try:
+            proc = subprocess.run(
+                ["ping", "-n", "1", "-w", "800", ip],
+                capture_output=True, text=True, timeout=2,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            m = re.search(r"(\d+)\s*ms", proc.stdout)
+            return int(m.group(1)) if m else None
+        except Exception:
+            return None
 
     def setup(self) -> bool:
         import urllib.request
@@ -246,23 +309,13 @@ class VPNManager:
             return False
 
         gw = None
-        for g in gateways:
-            for t in g.get("capabilities", {}).get("transport", []):
-                if t.get("type") == "openvpn":
-                    gw = {
-                        "ip":    g["ip_address"],
-                        "port":  t.get("ports",     ["1194"])[0],
-                        "proto": t.get("protocols", ["udp"])[0],
-                    }
-                    break
-            if gw:
-                break
+        gw = self._pick_gateway(eip)
 
         if not gw:
             self.log("no openvpn gateway available.", "red")
             return False
 
-        self.log(f"gateway: {gw['ip']}:{gw['port']}/{gw['proto']}", "green")
+        self.log(f"gateway: {gw['ip']}:{gw['port']}/{gw['proto']} ({gw['country']})", "green")
 
         cert_url = f"{api_uri}/{api_ver}/cert"
         self.log("requesting client certificate...", "pink")
@@ -488,7 +541,7 @@ class JsApi:
         self._discord_delay = int(seconds)
 
     def get_vpn_hold(self) -> int:
-        return self._vpn.vpn_hold_s if self._vpn else 5
+        return self._vpn.vpn_hold_s if self._vpn else 18
 
     def set_vpn_hold(self, seconds: int):
         if self._vpn:
@@ -536,19 +589,20 @@ class JsApi:
         self._play("connected")
         time.sleep(1.5)
 
-        self._log("killing discord...", "dim")
-        self._kill_discord()
+        self._log("reloading discord (ctrl+r)...", "dim")
         time.sleep(self._vpn.discord_delay_s)
-
-        self._log("relaunching discord...", "dim")
-        self._open_discord()
-
-        self._log("waiting for discord...", "dim")
-        disc_ok = self._wait_discord(25)
+        disc_ok = self._reload_discord()
         if disc_ok:
-            self._log("discord is up.", "green")
+            self._log("discord reloaded.", "green")
         else:
-            self._log("discord took too long.", "red")
+            self._log("discord window not found, falling back to kill/reopen...", "red")
+            self._kill_discord()
+            time.sleep(self._vpn.discord_delay_s)
+            self._open_discord()
+            if self._wait_discord(25):
+                self._log("discord is up.", "green")
+            else:
+                self._log("discord took too long.", "red")
 
         hold_s = self._vpn.vpn_hold_s
         self._log(f"holding tunnel {hold_s}s more...", "dim")
@@ -561,6 +615,109 @@ class JsApi:
         self._play("success")
 
     # ── Discord helpers ───────────────────────────────────────────────────────
+    def _reload_discord(self) -> bool:
+        """Envia Ctrl+R pra janela do Discord em vez de matar o processo.
+
+        Funciona porque o problema real é só o gateway/websocket ficar preso
+        na rota antiga; um reload (Ctrl+R) refaz a conexão sem derrubar o
+        app inteiro. Retorna False se não achar nenhuma janela do Discord
+        (aí quem chamou cai no fallback de kill/reopen).
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+
+        # Pega os PIDs reais do Discord.exe — filtrar só pelo título da
+        # janela não é confiável (uma aba "discord.com" aberta no Chrome
+        # também bate, e o Electron usa a mesma classe de janela do
+        # Chromium, então dava reload no Chrome em vez do Discord).
+        discord_pids = set()
+        try:
+            import psutil
+            for p in psutil.process_iter(["name", "pid"]):
+                try:
+                    name = (p.info["name"] or "").lower()
+                    if name == "discord.exe":
+                        discord_pids.add(p.info["pid"])
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+
+        if not discord_pids:
+            return False
+
+        hwnds = []
+
+        def _enum_proc(hwnd, lparam):
+            if user32.IsWindowVisible(hwnd):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in discord_pids:
+                    # ignora janelas "owned" (popups/tooltips internos) e
+                    # fica só com janelas de topo de verdade
+                    if user32.GetWindow(hwnd, 4) == 0:  # GW_OWNER == 4
+                        length = user32.GetWindowTextLengthW(hwnd)
+                        if length > 0:
+                            hwnds.append(hwnd)
+            return True
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        user32.EnumWindows(EnumWindowsProc(_enum_proc), 0)
+
+        if not hwnds:
+            return False
+
+        hwnd = hwnds[0]
+        SW_RESTORE = 9
+        user32.ShowWindow(hwnd, SW_RESTORE)
+
+        # O Windows bloqueia SetForegroundWindow se o processo que chama não
+        # "tem permissão" pra roubar foco (foreground lock) — por isso só
+        # funcionava quando você passava o mouse em cima (isso troca o foco
+        # manualmente). O jeito confiável de contornar é anexar a thread de
+        # input da nossa janela à thread da janela alvo antes de chamar
+        # SetForegroundWindow.
+        kernel32 = ctypes.windll.kernel32
+        fg_hwnd = user32.GetForegroundWindow()
+        target_pid = wintypes.DWORD()
+        target_tid = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(target_pid))
+        current_tid = kernel32.GetCurrentThreadId()
+
+        attached = False
+        if target_tid and target_tid != current_tid:
+            attached = bool(user32.AttachThreadInput(current_tid, target_tid, True))
+
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_tid, target_tid, False)
+
+        time.sleep(0.3)
+
+        # confere se realmente conseguimos o foco antes de mandar as teclas
+        if user32.GetForegroundWindow() != hwnd:
+            return False
+
+        # Envia Ctrl+R via SendInput (nível de driver, funciona em Electron)
+        VK_CONTROL = 0x11
+        VK_R = 0x52
+        KEYEVENTF_KEYUP = 0x0002
+
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        time.sleep(0.05)
+        user32.keybd_event(VK_R, 0, 0, 0)
+        time.sleep(0.05)
+        user32.keybd_event(VK_R, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+        return True
+
     def _kill_discord(self):
         try:
             import psutil
