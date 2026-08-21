@@ -647,9 +647,9 @@
       <div class="stg-divider"></div>
 
       <div class="stg-label">VPN HOLD AFTER DISCORD OPENS (s)</div>
-      <input type="range" id="hold-slider" min="2" max="60" step="1" value="18"
+      <input type="range" id="hold-slider" min="2" max="60" step="1" value="25"
              oninput="document.getElementById('hold-val').textContent=this.value+'s'; pywebview.api.set_vpn_hold(parseInt(this.value))">
-      <div id="hold-val">18s</div>
+      <div id="hold-val">25s</div>
       <div class="toggle-hint">tempo que a vpn continua ativa depois que o discord<br>reabre, antes de desconectar. aumente se estiver<br>caindo cedo demais.</div>
 
       <div class="stg-divider"></div>
@@ -657,7 +657,7 @@
       <div class="toggle-row">
         <span class="toggle-label">split tunneling</span>
         <label class="toggle-switch">
-          <input type="checkbox" id="toggle-split" onchange="onSplitToggle(this)">
+          <input type="checkbox" id="toggle-split" checked onchange="onSplitToggle(this)">
           <span class="toggle-track"></span>
         </label>
       </div>

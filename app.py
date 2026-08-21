@@ -22,7 +22,7 @@ import time
 import zipfile
 
 # ── Versão / Auto-update ─────────────────────────────────────────────────────
-__version__ = "1.6.7"
+__version__ = "1.6.9"
 GITHUB_REPO        = "HyaFranch/hyavpn-themed-lain"
 GITHUB_API_LATEST  = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET_NAME  = "hyavpn-dist.zip"
@@ -157,9 +157,9 @@ class VPNManager:
     def _load_vpn_hold(self) -> int:
         try:
             with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return int(json.load(f).get("vpn_hold", 18))
+                return int(json.load(f).get("vpn_hold", 25))
         except Exception:
-            return 18
+            return 25
 
     def _save_settings(self):
         try:
@@ -526,7 +526,7 @@ class JsApi:
 
     # ── VPN settings ──────────────────────────────────────────────────────────
     def get_split_tunnel(self) -> bool:
-        return self._vpn.split_tunnel if self._vpn else False
+        return self._vpn.split_tunnel if self._vpn else True
 
     def set_split_tunnel(self, enabled: bool):
         if self._vpn:
@@ -541,7 +541,7 @@ class JsApi:
         self._discord_delay = int(seconds)
 
     def get_vpn_hold(self) -> int:
-        return self._vpn.vpn_hold_s if self._vpn else 18
+        return self._vpn.vpn_hold_s if self._vpn else 25
 
     def set_vpn_hold(self, seconds: int):
         if self._vpn:
